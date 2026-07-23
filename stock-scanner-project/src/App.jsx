@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from "react";
-import { TrendingDown, TrendingUp, BarChart3, Gauge, AlertTriangle, Upload, PlayCircle, X, Plus } from "lucide-react";
+import React, { useState, useMemo, useEffect } from "react";
+import { TrendingDown, TrendingUp, BarChart3, Gauge, AlertTriangle, Upload, PlayCircle, X, Plus, RefreshCw, Loader2 } from "lucide-react";
 
 // ---------- Design tokens ----------
 const C = {
@@ -59,6 +59,24 @@ function buildDemoCSV() {
   return "date,open,high,low,close,volume\n" + rows.join("\n");
 }
 const DEMO_CSV = buildDemoCSV();
+
+// ---------- Live data fetch (via /api/quote, which proxies Yahoo Finance) ----------
+function barsToCSV(bars) {
+  const rows = bars.map((b) => [b.date, b.open, b.high, b.low, b.close, b.volume].join(","));
+  return "date,open,high,low,close,volume\n" + rows.join("\n");
+}
+
+async function fetchQuote(ticker) {
+  const resp = await fetch(`/api/quote?ticker=${encodeURIComponent(ticker)}`);
+  let data;
+  try {
+    data = await resp.json();
+  } catch {
+    throw new Error("获取数据失败：接口返回格式异常");
+  }
+  if (!resp.ok) throw new Error(data.error || "获取数据失败");
+  return data.bars;
+}
 
 // ---------- Parsing ----------
 function parseCSV(text) {
@@ -312,7 +330,9 @@ function FactorBar({ factorKey, label, value, note, color }) {
 
 // ---------- Per-ticker analysis panel (the original single-stock tool, now scoped to one ticker) ----------
 function TickerPanel({ ticker, state, updateState, onClose }) {
-  const { raw, bars, error, weights } = state;
+  const { raw, bars, error, weights, fetchedAt, autoFetchTried } = state;
+  const [fetching, setFetching] = useState(false);
+  const [showManual, setShowManual] = useState(false);
 
   const handleParse = (text) => {
     try {
@@ -322,6 +342,28 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
       updateState({ bars: null, error: e.message });
     }
   };
+
+  const handleFetchLive = async () => {
+    setFetching(true);
+    updateState({ error: "" });
+    try {
+      const liveBars = await fetchQuote(ticker);
+      const csv = barsToCSV(liveBars);
+      updateState({ raw: csv, bars: liveBars, error: "", fetchedAt: new Date().toISOString(), autoFetchTried: true });
+    } catch (e) {
+      updateState({ error: e.message, autoFetchTried: true });
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  // Auto-fetch live data the first time this ticker's panel is opened.
+  useEffect(() => {
+    if (!autoFetchTried && !bars) {
+      handleFetchLive();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticker]);
 
   const results = useMemo(() => {
     if (!bars) return null;
@@ -362,39 +404,71 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
       <div className="grid gap-5" style={{ gridTemplateColumns: "360px 1fr" }}>
         {/* Left: input */}
         <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 16 }}>
-          <div style={{ color: C.text, fontSize: 13, fontWeight: 600, marginBottom: 8 }}>数据输入</div>
-          <div style={{ color: C.textMuted, fontSize: 11, marginBottom: 8, ...mono }}>
-            格式：date,open,high,low,close,volume（每行一天，至少30天）
+          <div style={{ color: C.text, fontSize: 13, fontWeight: 600, marginBottom: 8 }}>数据来源</div>
+          <div style={{ color: C.textMuted, fontSize: 11, marginBottom: 10, lineHeight: 1.6 }}>
+            自动获取 {ticker} 最近 60 个交易日的日线数据（数据来自 Yahoo Finance）。
           </div>
-          <textarea
-            value={raw}
-            onChange={(e) => updateState({ raw: e.target.value })}
-            placeholder={`粘贴 ${ticker} 的日线 OHLCV 数据…`}
-            rows={10}
+          <button
+            onClick={handleFetchLive}
+            disabled={fetching}
+            className="flex items-center gap-1"
             style={{
-              width: "100%", background: C.panelAlt, color: C.text, border: `1px solid ${C.border}`,
-              borderRadius: 6, padding: 10, fontSize: 11, ...mono, resize: "vertical",
+              background: C.gold, color: "#1A1305", border: "none", borderRadius: 6, padding: "8px 12px",
+              fontSize: 12, fontWeight: 700, cursor: fetching ? "default" : "pointer", opacity: fetching ? 0.7 : 1,
             }}
-          />
-          <div className="flex gap-2 mt-3">
-            <button
-              onClick={() => handleParse(raw)}
-              className="flex items-center gap-1"
-              style={{ background: C.gold, color: "#1A1305", border: "none", borderRadius: 6, padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
-            >
-              <Upload size={14} /> 解析数据
-            </button>
-            <button
-              onClick={() => { updateState({ raw: DEMO_CSV }); handleParse(DEMO_CSV); }}
-              className="flex items-center gap-1"
-              style={{ background: "transparent", color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 12px", fontSize: 12, cursor: "pointer" }}
-            >
-              <PlayCircle size={14} /> 加载示例数据
-            </button>
-          </div>
+          >
+            {fetching ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+            {fetching ? "获取中…" : bars ? "刷新数据" : "获取最新数据"}
+          </button>
+          {fetchedAt && !fetching && (
+            <div style={{ color: C.textMuted, fontSize: 11, marginTop: 6, ...mono }}>
+              上次更新：{new Date(fetchedAt).toLocaleString("zh-CN")}
+            </div>
+          )}
           {error && (
             <div className="flex items-start gap-1 mt-3" style={{ color: C.bear, fontSize: 12 }}>
               <AlertTriangle size={14} style={{ marginTop: 1 }} /> {error}
+            </div>
+          )}
+
+          <button
+            onClick={() => setShowManual((v) => !v)}
+            style={{ background: "transparent", color: C.textMuted, border: "none", fontSize: 11, marginTop: 16, padding: 0, cursor: "pointer", textDecoration: "underline" }}
+          >
+            {showManual ? "收起手动输入" : "自动获取失败？手动粘贴数据 / 加载示例数据"}
+          </button>
+
+          {showManual && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ color: C.textMuted, fontSize: 11, marginBottom: 8, ...mono }}>
+                格式：date,open,high,low,close,volume（每行一天，至少30天）
+              </div>
+              <textarea
+                value={raw}
+                onChange={(e) => updateState({ raw: e.target.value })}
+                placeholder={`粘贴 ${ticker} 的日线 OHLCV 数据…`}
+                rows={10}
+                style={{
+                  width: "100%", background: C.panelAlt, color: C.text, border: `1px solid ${C.border}`,
+                  borderRadius: 6, padding: 10, fontSize: 11, ...mono, resize: "vertical",
+                }}
+              />
+              <div className="flex gap-2 mt-3">
+                <button
+                  onClick={() => handleParse(raw)}
+                  className="flex items-center gap-1"
+                  style={{ background: C.gold, color: "#1A1305", border: "none", borderRadius: 6, padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+                >
+                  <Upload size={14} /> 解析数据
+                </button>
+                <button
+                  onClick={() => { updateState({ raw: DEMO_CSV }); handleParse(DEMO_CSV); }}
+                  className="flex items-center gap-1"
+                  style={{ background: "transparent", color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 12px", fontSize: 12, cursor: "pointer" }}
+                >
+                  <PlayCircle size={14} /> 加载示例数据
+                </button>
+              </div>
             </div>
           )}
 
@@ -536,7 +610,7 @@ function WatchlistCard({ ticker, state, onOpen, onRemove }) {
 }
 
 const DEFAULT_TICKER_STATE = () => ({
-  raw: "", bars: null, error: "",
+  raw: "", bars: null, error: "", fetchedAt: null, autoFetchTried: false,
   weights: { candle: 25, support: 25, volume: 25, trend: 25 },
 });
 
