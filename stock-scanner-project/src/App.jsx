@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { TrendingDown, TrendingUp, BarChart3, Gauge, AlertTriangle, Upload, PlayCircle } from "lucide-react";
+import { TrendingDown, TrendingUp, BarChart3, Gauge, AlertTriangle, Upload, PlayCircle, X, Plus } from "lucide-react";
 
 // ---------- Design tokens ----------
 const C = {
@@ -310,20 +310,16 @@ function FactorBar({ factorKey, label, value, note, color }) {
   );
 }
 
-export default function StockBottomScanner() {
-  const [raw, setRaw] = useState("");
-  const [bars, setBars] = useState(null);
-  const [error, setError] = useState("");
-  const [weights, setWeights] = useState({ candle: 25, support: 25, volume: 25, trend: 25 });
+// ---------- Per-ticker analysis panel (the original single-stock tool, now scoped to one ticker) ----------
+function TickerPanel({ ticker, state, updateState, onClose }) {
+  const { raw, bars, error, weights } = state;
 
   const handleParse = (text) => {
     try {
       const parsed = parseCSV(text);
-      setBars(parsed);
-      setError("");
+      updateState({ bars: parsed, error: "" });
     } catch (e) {
-      setError(e.message);
-      setBars(null);
+      updateState({ bars: null, error: e.message });
     }
   };
 
@@ -340,13 +336,24 @@ export default function StockBottomScanner() {
     return { cs, sup, vol, trend, composite };
   }, [bars, weights]);
 
-  const setW = (k, v) => setWeights((prev) => ({ ...prev, [k]: v }));
+  const setW = (k, v) => updateState({ weights: { ...weights, [k]: v } });
 
   return (
-    <div style={{ background: C.bg, minHeight: 600, padding: 24, ...sans }}>
-      <div className="flex items-center gap-2 mb-1">
-        <Gauge size={20} color={C.gold} />
-        <h1 style={{ color: C.text, fontSize: 20, fontWeight: 700, letterSpacing: 0.3 }}>止跌形态多因子扫描器</h1>
+    <div style={{ ...sans, padding: 24, height: "100%", overflowY: "auto" }}>
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-2">
+          <Gauge size={20} color={C.gold} />
+          <h1 style={{ color: C.text, fontSize: 20, fontWeight: 700, letterSpacing: 0.3 }}>
+            {ticker} · 止跌形态多因子扫描器
+          </h1>
+        </div>
+        <button
+          onClick={onClose}
+          className="flex items-center gap-1"
+          style={{ background: "transparent", color: C.textMuted, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 10px", fontSize: 12, cursor: "pointer" }}
+        >
+          <X size={14} /> 返回列表
+        </button>
       </div>
       <p style={{ color: C.textMuted, fontSize: 12, marginBottom: 20 }}>
         综合K线形态 · 支撑位测试 · 量能变化 · 趋势动能，输出可解释的合成分数 — 不构成投资建议，仅作分析辅助。
@@ -361,8 +368,8 @@ export default function StockBottomScanner() {
           </div>
           <textarea
             value={raw}
-            onChange={(e) => setRaw(e.target.value)}
-            placeholder="粘贴日线 OHLCV 数据…"
+            onChange={(e) => updateState({ raw: e.target.value })}
+            placeholder={`粘贴 ${ticker} 的日线 OHLCV 数据…`}
             rows={10}
             style={{
               width: "100%", background: C.panelAlt, color: C.text, border: `1px solid ${C.border}`,
@@ -378,7 +385,7 @@ export default function StockBottomScanner() {
               <Upload size={14} /> 解析数据
             </button>
             <button
-              onClick={() => { setRaw(DEMO_CSV); handleParse(DEMO_CSV); }}
+              onClick={() => { updateState({ raw: DEMO_CSV }); handleParse(DEMO_CSV); }}
               className="flex items-center gap-1"
               style={{ background: "transparent", color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 12px", fontSize: 12, cursor: "pointer" }}
             >
@@ -471,6 +478,177 @@ export default function StockBottomScanner() {
             </div>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Watchlist card on the home page ----------
+function computeSummary(state) {
+  if (!state || !state.bars) return null;
+  const { bars, weights } = state;
+  const cs = scoreCandlestick(bars);
+  const sup = scoreSupport(bars);
+  const vol = scoreVolume(bars);
+  const trend = scoreTrend(bars);
+  const totalW = weights.candle + weights.support + weights.volume + weights.trend || 1;
+  const composite = Math.round(
+    (cs.score * weights.candle + sup.score * weights.support + vol.score * weights.volume + trend.score * weights.trend) / totalW
+  );
+  return composite;
+}
+
+function WatchlistCard({ ticker, state, onOpen, onRemove }) {
+  const composite = computeSummary(state);
+  const hasData = !!state?.bars;
+  const color = composite == null ? C.textMuted : composite >= 65 ? C.bull : composite >= 40 ? C.amber : C.bear;
+  const label = composite == null ? "尚未导入数据" : composite >= 65 ? "止跌信号较强" : composite >= 40 ? "信号中性偏弱" : "止跌信号不足";
+
+  return (
+    <div
+      onClick={onOpen}
+      style={{
+        background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18,
+        cursor: "pointer", transition: "border-color .2s, transform .2s", position: "relative",
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.gold; e.currentTarget.style.transform = "translateY(-2px)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.transform = "translateY(0)"; }}
+    >
+      <button
+        onClick={(e) => { e.stopPropagation(); onRemove(); }}
+        style={{ position: "absolute", top: 10, right: 10, background: "transparent", border: "none", color: C.textMuted, cursor: "pointer", padding: 4 }}
+        title="移除"
+      >
+        <X size={14} />
+      </button>
+      <div style={{ ...mono, color: C.text, fontSize: 18, fontWeight: 700, marginBottom: 6 }}>{ticker}</div>
+      <div className="flex items-center gap-2 mb-2">
+        <div style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0 }} />
+        <span style={{ ...sans, color, fontSize: 12, fontWeight: 600 }}>{label}</span>
+      </div>
+      {hasData ? (
+        <div style={{ ...mono, color: C.textMuted, fontSize: 24, fontWeight: 700 }}>{composite}</div>
+      ) : (
+        <div style={{ ...sans, color: C.textMuted, fontSize: 11 }}>点击导入数据并查看分析</div>
+      )}
+    </div>
+  );
+}
+
+const DEFAULT_TICKER_STATE = () => ({
+  raw: "", bars: null, error: "",
+  weights: { candle: 25, support: 25, volume: 25, trend: 25 },
+});
+
+export default function App() {
+  const [tickers, setTickers] = useState(["NFLX", "TSLA", "AAPL"]);
+  const [tickerStates, setTickerStates] = useState({});
+  const [activeTicker, setActiveTicker] = useState(null);
+  const [newTicker, setNewTicker] = useState("");
+
+  const getState = (t) => tickerStates[t] || DEFAULT_TICKER_STATE();
+
+  const updateTickerState = (t, patch) => {
+    setTickerStates((prev) => ({ ...prev, [t]: { ...getState(t), ...patch } }));
+  };
+
+  const addTicker = () => {
+    const t = newTicker.trim().toUpperCase();
+    if (!t || tickers.includes(t)) { setNewTicker(""); return; }
+    setTickers((prev) => [...prev, t]);
+    setNewTicker("");
+  };
+
+  const removeTicker = (t) => {
+    setTickers((prev) => prev.filter((x) => x !== t));
+    setTickerStates((prev) => {
+      const next = { ...prev };
+      delete next[t];
+      return next;
+    });
+    if (activeTicker === t) setActiveTicker(null);
+  };
+
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh", ...sans, position: "relative", overflow: "hidden" }}>
+      {/* ---- Home page: watchlist ---- */}
+      <div style={{ padding: 24, maxWidth: 900, margin: "0 auto" }}>
+        <div className="flex items-center gap-2 mb-1">
+          <Gauge size={22} color={C.gold} />
+          <h1 style={{ color: C.text, fontSize: 22, fontWeight: 700, letterSpacing: 0.3 }}>我的止跌观察列表</h1>
+        </div>
+        <p style={{ color: C.textMuted, fontSize: 12, marginBottom: 20 }}>
+          点击任意股票代码，查看它的K线形态、支撑位、量能与趋势动能多因子分析。
+        </p>
+
+        <div className="flex gap-2 mb-6">
+          <input
+            value={newTicker}
+            onChange={(e) => setNewTicker(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addTicker()}
+            placeholder="添加股票代码，比如 AMZN"
+            style={{
+              flex: 1, background: C.panel, color: C.text, border: `1px solid ${C.border}`,
+              borderRadius: 8, padding: "10px 12px", fontSize: 13, ...mono,
+            }}
+          />
+          <button
+            onClick={addTicker}
+            className="flex items-center gap-1"
+            style={{ background: C.gold, color: "#1A1305", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+          >
+            <Plus size={14} /> 添加
+          </button>
+        </div>
+
+        <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))" }}>
+          {tickers.map((t) => (
+            <WatchlistCard
+              key={t}
+              ticker={t}
+              state={tickerStates[t]}
+              onOpen={() => setActiveTicker(t)}
+              onRemove={() => removeTicker(t)}
+            />
+          ))}
+          {tickers.length === 0 && (
+            <div style={{ color: C.textMuted, fontSize: 13, gridColumn: "1 / -1", textAlign: "center", padding: "40px 0" }}>
+              列表是空的，添加一个股票代码开始追踪吧。
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ---- Backdrop ---- */}
+      <div
+        onClick={() => setActiveTicker(null)}
+        style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+          opacity: activeTicker ? 1 : 0,
+          pointerEvents: activeTicker ? "auto" : "none",
+          transition: "opacity .3s ease",
+          zIndex: 40,
+        }}
+      />
+
+      {/* ---- Slide-in detail panel ---- */}
+      <div
+        style={{
+          position: "fixed", top: 0, right: 0, bottom: 0, width: "min(1100px, 100vw)",
+          background: C.bg, borderLeft: `1px solid ${C.border}`, boxShadow: "-12px 0 40px rgba(0,0,0,0.35)",
+          transform: activeTicker ? "translateX(0)" : "translateX(100%)",
+          transition: "transform .35s cubic-bezier(.4,0,.2,1)",
+          zIndex: 50,
+        }}
+      >
+        {activeTicker && (
+          <TickerPanel
+            ticker={activeTicker}
+            state={getState(activeTicker)}
+            updateState={(patch) => updateTickerState(activeTicker, patch)}
+            onClose={() => setActiveTicker(null)}
+          />
+        )}
       </div>
     </div>
   );
