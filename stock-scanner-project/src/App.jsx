@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { TrendingDown, TrendingUp, BarChart3, Gauge, AlertTriangle, Upload, PlayCircle, X, Plus, RefreshCw, Loader2 } from "lucide-react";
+import { getCachedBars, setCachedBars, clearCache, msUntilNextPstMidnight } from "./ticker-cache.js";
 
 // ---------- Design tokens ----------
 const C = {
@@ -330,7 +331,7 @@ function FactorBar({ factorKey, label, value, note, color }) {
 
 // ---------- Per-ticker analysis panel (the original single-stock tool, now scoped to one ticker) ----------
 function TickerPanel({ ticker, state, updateState, onClose }) {
-  const { raw, bars, error, weights, fetchedAt, autoFetchTried } = state;
+  const { raw, bars, error, weights, fetchedAt, autoFetchTried, fromCache } = state;
   const [fetching, setFetching] = useState(false);
   const [showManual, setShowManual] = useState(false);
 
@@ -343,13 +344,27 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
     }
   };
 
-  const handleFetchLive = async () => {
+  const handleFetchLive = async ({ force = false } = {}) => {
+    if (!force) {
+      const cached = getCachedBars(ticker);
+      if (cached) {
+        updateState({
+          raw: barsToCSV(cached), bars: cached, error: "",
+          fetchedAt: new Date().toISOString(), autoFetchTried: true, fromCache: true,
+        });
+        return;
+      }
+    }
     setFetching(true);
     updateState({ error: "" });
     try {
       const liveBars = await fetchQuote(ticker);
+      setCachedBars(ticker, liveBars);
       const csv = barsToCSV(liveBars);
-      updateState({ raw: csv, bars: liveBars, error: "", fetchedAt: new Date().toISOString(), autoFetchTried: true });
+      updateState({
+        raw: csv, bars: liveBars, error: "",
+        fetchedAt: new Date().toISOString(), autoFetchTried: true, fromCache: false,
+      });
     } catch (e) {
       updateState({ error: e.message, autoFetchTried: true });
     } finally {
@@ -409,7 +424,7 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
             自动获取 {ticker} 最近 60 个交易日的日线数据（数据来自 Yahoo Finance）。
           </div>
           <button
-            onClick={handleFetchLive}
+            onClick={() => handleFetchLive({ force: true })}
             disabled={fetching}
             className="flex items-center gap-1"
             style={{
@@ -423,6 +438,7 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
           {fetchedAt && !fetching && (
             <div style={{ color: C.textMuted, fontSize: 11, marginTop: 6, ...mono }}>
               上次更新：{new Date(fetchedAt).toLocaleString("zh-CN")}
+              {fromCache && "（本地缓存，6小时内）"}
             </div>
           )}
           {error && (
@@ -610,15 +626,50 @@ function WatchlistCard({ ticker, state, onOpen, onRemove }) {
 }
 
 const DEFAULT_TICKER_STATE = () => ({
-  raw: "", bars: null, error: "", fetchedAt: null, autoFetchTried: false,
+  raw: "", bars: null, error: "", fetchedAt: null, autoFetchTried: false, fromCache: false,
   weights: { candle: 25, support: 25, volume: 25, trend: 25 },
 });
 
+const DEFAULT_TICKERS = [
+  "NFLX", "TSLA", "AAPL", "NVDA", "MSFT", "AMZN", "ASML", "AMD", "AVGO", "XYZ",
+  "META", "DIS", "ORCL", "GOOG", "SPY", "TSM", "MU", "GOOGL", "BRK-B", "NOW",
+  "MRVL", "BKNG", "SPOT",
+];
+
+// Seeds watchlist cards with cached data (if still fresh) so scores show up
+// immediately on load, without needing to open each ticker's panel first.
+function hydrateFromCache(tickers) {
+  const initial = {};
+  for (const t of tickers) {
+    const cached = getCachedBars(t);
+    if (cached) {
+      initial[t] = {
+        ...DEFAULT_TICKER_STATE(), bars: cached, raw: barsToCSV(cached),
+        fetchedAt: new Date().toISOString(), autoFetchTried: true, fromCache: true,
+      };
+    }
+  }
+  return initial;
+}
+
 export default function App() {
-  const [tickers, setTickers] = useState(["NFLX", "TSLA", "AAPL"]);
-  const [tickerStates, setTickerStates] = useState({});
+  const [tickers, setTickers] = useState(DEFAULT_TICKERS);
+  const [tickerStates, setTickerStates] = useState(() => hydrateFromCache(DEFAULT_TICKERS));
   const [activeTicker, setActiveTicker] = useState(null);
   const [newTicker, setNewTicker] = useState("");
+
+  // Hard-wipe the cache once per PST calendar day, even for a tab left open across midnight.
+  useEffect(() => {
+    let timer;
+    const scheduleNextClear = () => {
+      timer = setTimeout(() => {
+        clearCache();
+        scheduleNextClear();
+      }, msUntilNextPstMidnight());
+    };
+    scheduleNextClear();
+    return () => clearTimeout(timer);
+  }, []);
 
   const getState = (t) => tickerStates[t] || DEFAULT_TICKER_STATE();
 
