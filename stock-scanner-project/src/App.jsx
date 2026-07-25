@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { TrendingDown, TrendingUp, BarChart3, Gauge, AlertTriangle, Upload, PlayCircle, X, Plus, RefreshCw, Loader2 } from "lucide-react";
 import { getCachedBars, setCachedBars, clearCache, msUntilNextPstMidnight } from "./ticker-cache.js";
 
@@ -77,6 +77,21 @@ async function fetchQuote(ticker) {
   }
   if (!resp.ok) throw new Error(data.error || "获取数据失败");
   return data.bars;
+}
+
+// Resolves a ticker's bars from cache (unless forced) or a live fetch, shaped
+// for direct use in ticker state. Shared by the manual/panel fetch path and
+// the background watchlist auto-loader below.
+async function loadTickerData(ticker, { force = false } = {}) {
+  if (!force) {
+    const cached = getCachedBars(ticker);
+    if (cached) {
+      return { bars: cached, raw: barsToCSV(cached), fetchedAt: new Date().toISOString(), fromCache: true };
+    }
+  }
+  const liveBars = await fetchQuote(ticker);
+  setCachedBars(ticker, liveBars);
+  return { bars: liveBars, raw: barsToCSV(liveBars), fetchedAt: new Date().toISOString(), fromCache: false };
 }
 
 // ---------- Parsing ----------
@@ -331,7 +346,7 @@ function FactorBar({ factorKey, label, value, note, color }) {
 
 // ---------- Per-ticker analysis panel (the original single-stock tool, now scoped to one ticker) ----------
 function TickerPanel({ ticker, state, updateState, onClose }) {
-  const { raw, bars, error, weights, fetchedAt, autoFetchTried, fromCache } = state;
+  const { raw, bars, error, weights, fetchedAt, autoFetchTried, fromCache, loading } = state;
   const [fetching, setFetching] = useState(false);
   const [showManual, setShowManual] = useState(false);
 
@@ -349,8 +364,8 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
       const cached = getCachedBars(ticker);
       if (cached) {
         updateState({
-          raw: barsToCSV(cached), bars: cached, error: "",
-          fetchedAt: new Date().toISOString(), autoFetchTried: true, fromCache: true,
+          bars: cached, raw: barsToCSV(cached), fetchedAt: new Date().toISOString(), fromCache: true,
+          error: "", autoFetchTried: true,
         });
         return;
       }
@@ -358,13 +373,8 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
     setFetching(true);
     updateState({ error: "" });
     try {
-      const liveBars = await fetchQuote(ticker);
-      setCachedBars(ticker, liveBars);
-      const csv = barsToCSV(liveBars);
-      updateState({
-        raw: csv, bars: liveBars, error: "",
-        fetchedAt: new Date().toISOString(), autoFetchTried: true, fromCache: false,
-      });
+      const result = await loadTickerData(ticker, { force: true });
+      updateState({ ...result, error: "", autoFetchTried: true });
     } catch (e) {
       updateState({ error: e.message, autoFetchTried: true });
     } finally {
@@ -372,9 +382,11 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
     }
   };
 
-  // Auto-fetch live data the first time this ticker's panel is opened.
+  // Auto-fetch live data the first time this ticker's panel is opened - unless
+  // the watchlist's background auto-loader is already fetching this same
+  // ticker, in which case just wait for that instead of firing a duplicate.
   useEffect(() => {
-    if (!autoFetchTried && !bars) {
+    if (!autoFetchTried && !bars && !loading) {
       handleFetchLive();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -591,8 +603,14 @@ function computeSummary(state) {
 function WatchlistCard({ ticker, state, onOpen, onRemove }) {
   const composite = computeSummary(state);
   const hasData = !!state?.bars;
-  const color = composite == null ? C.textMuted : composite >= 65 ? C.bull : composite >= 40 ? C.amber : C.bear;
-  const label = composite == null ? "尚未导入数据" : composite >= 65 ? "止跌信号较强" : composite >= 40 ? "信号中性偏弱" : "止跌信号不足";
+  const isLoading = !hasData && !!state?.loading;
+  const hasFailed = !hasData && !isLoading && !!state?.error;
+  const color = composite != null
+    ? (composite >= 65 ? C.bull : composite >= 40 ? C.amber : C.bear)
+    : hasFailed ? C.bear : C.textMuted;
+  const label = composite == null
+    ? (isLoading ? "自动获取中…" : hasFailed ? "自动获取失败" : "尚未导入数据")
+    : composite >= 65 ? "止跌信号较强" : composite >= 40 ? "信号中性偏弱" : "止跌信号不足";
 
   return (
     <div
@@ -619,14 +637,16 @@ function WatchlistCard({ ticker, state, onOpen, onRemove }) {
       {hasData ? (
         <div style={{ ...mono, color: C.textMuted, fontSize: 24, fontWeight: 700 }}>{composite}</div>
       ) : (
-        <div style={{ ...sans, color: C.textMuted, fontSize: 11 }}>点击导入数据并查看分析</div>
+        <div style={{ ...sans, color: C.textMuted, fontSize: 11 }}>
+          {isLoading ? "正在自动获取数据…" : hasFailed ? "点击重试或手动导入数据" : "点击导入数据并查看分析"}
+        </div>
       )}
     </div>
   );
 }
 
 const DEFAULT_TICKER_STATE = () => ({
-  raw: "", bars: null, error: "", fetchedAt: null, autoFetchTried: false, fromCache: false,
+  raw: "", bars: null, error: "", fetchedAt: null, autoFetchTried: false, fromCache: false, loading: false,
   weights: { candle: 25, support: 25, volume: 25, trend: 25 },
 });
 
@@ -676,6 +696,34 @@ export default function App() {
   const updateTickerState = (t, patch) => {
     setTickerStates((prev) => ({ ...prev, [t]: { ...getState(t), ...patch } }));
   };
+
+  // Auto-load any ticker that doesn't already have cached/loaded data, so the
+  // watchlist fills in on its own without the user opening each panel. Each
+  // ticker's load is fully independent - one failing never touches the others.
+  // Requests are staggered rather than fired all at once, since Yahoo's chart
+  // endpoint is unofficial and more likely to rate-limit a simultaneous burst.
+  const autoLoadedRef = useRef(new Set());
+  useEffect(() => {
+    let pending = 0;
+    tickers.forEach((t) => {
+      if (autoLoadedRef.current.has(t)) return;
+      autoLoadedRef.current.add(t);
+      if (getState(t).bars) return; // already have data (e.g. hydrated from cache)
+
+      const delay = pending * 150;
+      pending += 1;
+      setTimeout(async () => {
+        updateTickerState(t, { loading: true, error: "" });
+        try {
+          const result = await loadTickerData(t);
+          updateTickerState(t, { ...result, error: "", autoFetchTried: true, loading: false });
+        } catch (e) {
+          updateTickerState(t, { error: e.message, autoFetchTried: true, loading: false });
+        }
+      }, delay);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tickers]);
 
   const addTicker = () => {
     const t = newTicker.trim().toUpperCase();
