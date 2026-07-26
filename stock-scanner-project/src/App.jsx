@@ -255,29 +255,10 @@ function scoreTrend(bars) {
   return { score: Math.min(100, Math.round(score)), lastRSI, ma20now, ma50, oversoldRecovering, ma20TurningUp };
 }
 
-// ---------- Gauge ----------
-function Gauge_({ value, size = 150 }) {
-  const r = size / 2 - 12;
-  const cx = size / 2, cy = size / 2;
-  const startAngle = -210, endAngle = 30; // 240-degree arc
-  const angle = startAngle + (value / 100) * (endAngle - startAngle);
-  const toXY = (deg) => {
-    const rad = (deg * Math.PI) / 180;
-    return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
-  };
-  const [sx, sy] = toXY(startAngle);
-  const [ex, ey] = toXY(angle);
-  const largeArc = angle - startAngle > 180 ? 1 : 0;
-  const color = value >= 65 ? C.bull : value >= 40 ? C.amber : C.bear;
-  const [bgex, bgey] = toXY(endAngle);
-  return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-      <path d={`M ${sx} ${sy} A ${r} ${r} 0 1 1 ${bgex} ${bgey}`} fill="none" stroke={C.border} strokeWidth="12" strokeLinecap="round" />
-      <path d={`M ${sx} ${sy} A ${r} ${r} 0 ${largeArc} 1 ${ex} ${ey}`} fill="none" stroke={color} strokeWidth="12" strokeLinecap="round" />
-      <text x={cx} y={cy - 2} textAnchor="middle" fill={C.text} fontSize="30" fontWeight="700" style={mono}>{value}</text>
-      <text x={cx} y={cy + 20} textAnchor="middle" fill={C.textMuted} fontSize="11" style={sans}>综合得分 / 100</text>
-    </svg>
-  );
+// Score -> bull/amber/bear color, used to color-code each factor at a glance
+// (both on the watchlist cards and the factor bars in the detail panel).
+function scoreColor(v) {
+  return v >= 65 ? C.bull : v >= 40 ? C.amber : C.bear;
 }
 
 // Plain-language "what this measures" copy, shown for every factor regardless of score
@@ -346,7 +327,7 @@ function FactorBar({ factorKey, label, value, note, color }) {
 
 // ---------- Per-ticker analysis panel (the original single-stock tool, now scoped to one ticker) ----------
 function TickerPanel({ ticker, state, updateState, onClose }) {
-  const { raw, bars, error, weights, fetchedAt, autoFetchTried, fromCache, loading } = state;
+  const { raw, bars, error, fetchedAt, autoFetchTried, fromCache, loading } = state;
   const [fetching, setFetching] = useState(false);
   const [showManual, setShowManual] = useState(false);
 
@@ -394,18 +375,13 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
 
   const results = useMemo(() => {
     if (!bars) return null;
-    const cs = scoreCandlestick(bars);
-    const sup = scoreSupport(bars);
-    const vol = scoreVolume(bars);
-    const trend = scoreTrend(bars);
-    const totalW = weights.candle + weights.support + weights.volume + weights.trend || 1;
-    const composite = Math.round(
-      (cs.score * weights.candle + sup.score * weights.support + vol.score * weights.volume + trend.score * weights.trend) / totalW
-    );
-    return { cs, sup, vol, trend, composite };
-  }, [bars, weights]);
-
-  const setW = (k, v) => updateState({ weights: { ...weights, [k]: v } });
+    return {
+      cs: scoreCandlestick(bars),
+      sup: scoreSupport(bars),
+      vol: scoreVolume(bars),
+      trend: scoreTrend(bars),
+    };
+  }, [bars]);
 
   return (
     <div style={{ ...sans, padding: 24, height: "100%", overflowY: "auto" }}>
@@ -425,7 +401,7 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
         </button>
       </div>
       <p style={{ color: C.textMuted, fontSize: 12, marginBottom: 20 }}>
-        综合K线形态 · 支撑位测试 · 量能变化 · 趋势动能，输出可解释的合成分数 — 不构成投资建议，仅作分析辅助。
+        K线形态 · 支撑位测试 · 量能变化 · 趋势动能，四项独立因子分别给分，不合成单一分数 — 不构成投资建议，仅作分析辅助。
       </p>
 
       <div className="grid gap-5" style={{ gridTemplateColumns: "360px 1fr" }}>
@@ -499,25 +475,6 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
               </div>
             </div>
           )}
-
-          <div style={{ color: C.text, fontSize: 13, fontWeight: 600, marginTop: 20, marginBottom: 8 }}>因子权重（可调整）</div>
-          {[
-            { k: "candle", label: "K线形态" },
-            { k: "support", label: "支撑位" },
-            { k: "volume", label: "量能" },
-            { k: "trend", label: "趋势动能" },
-          ].map(({ k, label }) => (
-            <div key={k} className="mb-2">
-              <div className="flex justify-between" style={{ fontSize: 11, color: C.textMuted }}>
-                <span>{label}</span><span style={mono}>{weights[k]}</span>
-              </div>
-              <input
-                type="range" min={0} max={100} value={weights[k]}
-                onChange={(e) => setW(k, parseInt(e.target.value))}
-                style={{ width: "100%" }}
-              />
-            </div>
-          ))}
         </div>
 
         {/* Right: results */}
@@ -528,45 +485,36 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
             </div>
           ) : (
             <div>
-              <div className="flex items-center gap-8 mb-6">
-                <Gauge_ value={results.composite} />
-                <div>
-                  <div style={{ color: C.text, fontSize: 15, fontWeight: 700, marginBottom: 4 }}>
-                    {results.composite >= 65 ? "止跌信号较强" : results.composite >= 40 ? "信号中性偏弱，需更多确认" : "止跌信号不足"}
-                  </div>
-                  <div style={{ color: C.textMuted, fontSize: 12, lineHeight: 1.6 }}>
-                    分数由四个独立因子加权得出，任何单一因子都不足以下结论，
-                    建议结合更大周期走势与基本面信息交叉验证。
-                  </div>
-                </div>
+              <div style={{ color: C.textMuted, fontSize: 12, lineHeight: 1.6, marginBottom: 16 }}>
+                以下四项因子相互独立，请分别参考，本工具不再合成单一分数——避免用一个数字掩盖不同维度之间的分歧。
               </div>
 
               <FactorBar
                 factorKey="candle"
                 label="K线形态"
                 value={results.cs.score}
-                color={C.gold}
+                color={scoreColor(results.cs.score)}
                 note={results.cs.patterns.length ? results.cs.patterns.map((p) => p.name).join("、") : "近期未检测到明显反转形态"}
               />
               <FactorBar
                 factorKey="support"
                 label="支撑位测试"
                 value={results.sup.score}
-                color={C.bull}
+                color={scoreColor(results.sup.score)}
                 note={`距区间低点 ${results.sup.distPct.toFixed(1)}%，${results.sup.touches} 次测试同一支撑区`}
               />
               <FactorBar
                 factorKey="volume"
                 label="量能变化"
                 value={results.vol.score}
-                color={C.amber}
+                color={scoreColor(results.vol.score)}
                 note={`${results.vol.shrinking ? "下跌缩量 ✓" : "下跌未明显缩量"}；${results.vol.spikeOnUpDay ? "反弹放量 ✓" : "反弹未见放量"}`}
               />
               <FactorBar
                 factorKey="trend"
                 label="趋势动能"
                 value={results.trend.score}
-                color={C.bear}
+                color={scoreColor(results.trend.score)}
                 note={`RSI(14) ${results.trend.lastRSI ? results.trend.lastRSI.toFixed(1) : "—"}${results.trend.oversoldRecovering ? "，从超卖区回升" : ""}${results.trend.ma20TurningUp ? "；MA20 转向上" : ""}`}
               />
 
@@ -586,31 +534,30 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
 }
 
 // ---------- Watchlist card on the home page ----------
-function computeSummary(state) {
+const FACTOR_TILES = [
+  { k: "candle", label: "K线" },
+  { k: "support", label: "支撑" },
+  { k: "volume", label: "量能" },
+  { k: "trend", label: "趋势" },
+];
+
+function computeFactorScores(state) {
   if (!state || !state.bars) return null;
-  const { bars, weights } = state;
-  const cs = scoreCandlestick(bars);
-  const sup = scoreSupport(bars);
-  const vol = scoreVolume(bars);
-  const trend = scoreTrend(bars);
-  const totalW = weights.candle + weights.support + weights.volume + weights.trend || 1;
-  const composite = Math.round(
-    (cs.score * weights.candle + sup.score * weights.support + vol.score * weights.volume + trend.score * weights.trend) / totalW
-  );
-  return composite;
+  const { bars } = state;
+  return {
+    candle: scoreCandlestick(bars).score,
+    support: scoreSupport(bars).score,
+    volume: scoreVolume(bars).score,
+    trend: scoreTrend(bars).score,
+  };
 }
 
 function WatchlistCard({ ticker, state, onOpen, onRemove }) {
-  const composite = computeSummary(state);
-  const hasData = !!state?.bars;
+  const scores = computeFactorScores(state);
+  const hasData = !!scores;
   const isLoading = !hasData && !!state?.loading;
   const hasFailed = !hasData && !isLoading && !!state?.error;
-  const color = composite != null
-    ? (composite >= 65 ? C.bull : composite >= 40 ? C.amber : C.bear)
-    : hasFailed ? C.bear : C.textMuted;
-  const label = composite == null
-    ? (isLoading ? "自动获取中…" : hasFailed ? "自动获取失败" : "尚未导入数据")
-    : composite >= 65 ? "止跌信号较强" : composite >= 40 ? "信号中性偏弱" : "止跌信号不足";
+  const statusColor = isLoading ? C.textMuted : hasFailed ? C.bear : C.textMuted;
 
   return (
     <div
@@ -629,16 +576,23 @@ function WatchlistCard({ ticker, state, onOpen, onRemove }) {
       >
         <X size={14} />
       </button>
-      <div style={{ ...mono, color: C.text, fontSize: 18, fontWeight: 700, marginBottom: 6 }}>{ticker}</div>
-      <div className="flex items-center gap-2 mb-2">
-        <div style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0 }} />
-        <span style={{ ...sans, color, fontSize: 12, fontWeight: 600 }}>{label}</span>
-      </div>
+      <div style={{ ...mono, color: C.text, fontSize: 18, fontWeight: 700, marginBottom: 10 }}>{ticker}</div>
       {hasData ? (
-        <div style={{ ...mono, color: C.textMuted, fontSize: 24, fontWeight: 700 }}>{composite}</div>
+        <div className="grid gap-2" style={{ gridTemplateColumns: "1fr 1fr" }}>
+          {FACTOR_TILES.map(({ k, label }) => (
+            <div
+              key={k}
+              style={{ background: C.panelAlt, border: `1px solid ${C.border}`, borderRadius: 6, padding: "5px 8px" }}
+            >
+              <div style={{ ...sans, color: C.textMuted, fontSize: 10 }}>{label}</div>
+              <div style={{ ...mono, color: scoreColor(scores[k]), fontSize: 17, fontWeight: 700 }}>{scores[k]}</div>
+            </div>
+          ))}
+        </div>
       ) : (
-        <div style={{ ...sans, color: C.textMuted, fontSize: 11 }}>
-          {isLoading ? "正在自动获取数据…" : hasFailed ? "点击重试或手动导入数据" : "点击导入数据并查看分析"}
+        <div className="flex items-center gap-1" style={{ color: statusColor, fontSize: 12 }}>
+          {isLoading && <Loader2 size={12} className="animate-spin" />}
+          <span>{isLoading ? "自动获取中…" : hasFailed ? "自动获取失败，点击重试" : "点击导入数据并查看分析"}</span>
         </div>
       )}
     </div>
@@ -647,7 +601,6 @@ function WatchlistCard({ ticker, state, onOpen, onRemove }) {
 
 const DEFAULT_TICKER_STATE = () => ({
   raw: "", bars: null, error: "", fetchedAt: null, autoFetchTried: false, fromCache: false, loading: false,
-  weights: { candle: 25, support: 25, volume: 25, trend: 25 },
 });
 
 const DEFAULT_TICKERS = [
