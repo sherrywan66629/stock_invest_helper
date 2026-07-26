@@ -156,43 +156,83 @@ function upperShadow(b) { return b.high - Math.max(b.open, b.close); }
 // just one that lands on the literal most recent candle.
 const PATTERN_LOOKBACK = 10;
 
+// Each pattern TYPE has a fixed "strength" constant (how reliable that kind
+// of formation is taken to be, by classic technical-analysis convention -
+// not something we compute, just an assigned ranking: Morning Star > Bullish
+// Engulfing > Hammer > Doji). baseScore(strength) is the score for an
+// instance that just barely qualifies. On top of that, each detected
+// instance gets a 0-7 point "quality" bonus based on how comfortably it
+// clears its own qualifying threshold (e.g. a doji with an almost-zero body
+// scores a bit higher than one that barely squeaks under the 10% cutoff) -
+// capped at 7 so a max-quality instance of one pattern can never outscore
+// even a bare-minimum instance of the next (smallest gap between pattern
+// types is 8 points, Hammer 63 -> Bullish Engulfing 71).
+function baseScore(strength) { return 15 + strength * 80; }
+// Linearly maps x from [0,1] and clamps the result - the shared building
+// block for every "cliff -> gradient" score in this file (candlestick
+// quality bonus, volume, trend), so a value just short of a threshold gets
+// partial credit instead of the same score as "not close at all".
+function clamp01(x) { return Math.max(0, Math.min(1, x)); }
+const QUALITY_BONUS = 7;
+
 function detectPatterns(bars) {
   const n = bars.length;
   const mostRecentByName = new Map();
-  const record = (name, strength, day) => {
+  const record = (name, score, day) => {
     const existing = mostRecentByName.get(name);
-    if (!existing || day > existing.day) mostRecentByName.set(name, { name, strength, day });
+    if (!existing || day > existing.day) mostRecentByName.set(name, { name, score, day });
   };
 
   const start = Math.max(2, n - PATTERN_LOOKBACK);
   for (let i = start; i < n; i++) {
     const last = bars[i], prev = bars[i - 1], prev2 = bars[i - 2];
 
-    // Hammer: small body, long lower shadow (>=2x body), short upper shadow
+    // Hammer (strength 0.6): small body, long lower shadow (>=2x body), short
+    // upper shadow. Quality = how much the lower shadow exceeds the 2x-body
+    // minimum - a shadow 5x the body or longer gets full bonus.
     if (range(last) > 0) {
       const body = bodySize(last);
       const lowSh = lowerShadow(last);
       const upSh = upperShadow(last);
       if (body <= range(last) * 0.35 && lowSh >= body * 2 && upSh <= body * 0.6) {
-        record("锤子线 Hammer", 0.6, last.date);
+        const shadowRatio = body > 0 ? lowSh / body : 5;
+        const quality = clamp01((shadowRatio - 2) / 3);
+        record("锤子线 Hammer", Math.round(baseScore(0.6) + quality * QUALITY_BONUS), last.date);
       }
     }
-    // Doji: body very small relative to range
-    if (range(last) > 0 && bodySize(last) <= range(last) * 0.1) {
-      record("十字星 Doji", 0.35, last.date);
+    // Doji (strength 0.35): body very small relative to range. Quality = how
+    // much smaller the body is than the 10%-of-range cutoff - a body at 0%
+    // (open == close) is a "textbook" doji and gets full bonus.
+    if (range(last) > 0) {
+      const bodyPct = bodySize(last) / range(last);
+      if (bodyPct <= 0.1) {
+        const quality = clamp01((0.1 - bodyPct) / 0.1);
+        record("十字星 Doji", Math.round(baseScore(0.35) + quality * QUALITY_BONUS), last.date);
+      }
     }
-    // Bullish engulfing: prev red, last green, last body engulfs prev body
+    // Bullish engulfing (strength 0.7): prev red, last green, last body
+    // engulfs prev body. Quality = how much bigger the engulfing body is
+    // than the engulfed one - 2x or more gets full bonus.
     if (prev.close < prev.open && last.close > last.open) {
       if (last.open <= prev.close && last.close >= prev.open) {
-        record("看涨吞没 Bullish Engulfing", 0.7, last.date);
+        const prevBody = bodySize(prev);
+        const engulfRatio = prevBody > 0 ? bodySize(last) / prevBody : 2;
+        const quality = clamp01(engulfRatio - 1);
+        record("看涨吞没 Bullish Engulfing", Math.round(baseScore(0.7) + quality * QUALITY_BONUS), last.date);
       }
     }
-    // Morning star: big down day, small-body middle day (gap down), big up day closing into first candle's body
+    // Morning star (strength 0.85): big down day, small-body middle day (gap
+    // down), big up day closing into first candle's body. Quality = how deep
+    // day 3's close recovers into day 1's decline - closing all the way back
+    // above day 1's open (100%+ recovery) gets full bonus.
     const day1Down = prev2.close < prev2.open && bodySize(prev2) > range(prev2) * 0.5;
     const day2Small = bodySize(prev) <= range(prev2) * 0.4;
     const day3Up = last.close > last.open && last.close >= (prev2.open + prev2.close) / 2;
     if (day1Down && day2Small && day3Up) {
-      record("启明星 Morning Star", 0.85, last.date);
+      const day1Drop = prev2.open - prev2.close;
+      const recovery = day1Drop > 0 ? (last.close - prev2.close) / day1Drop : 0.5;
+      const quality = clamp01((recovery - 0.5) / 0.5);
+      record("启明星 Morning Star", Math.round(baseScore(0.85) + quality * QUALITY_BONUS), last.date);
     }
   }
   return Array.from(mostRecentByName.values());
@@ -235,14 +275,9 @@ function scoreCandlestick(bars) {
   if (patterns.length === 0) {
     return { score: baselineCandleScore(bars), patterns, baselineNote: describeBaselineCandle(bars) };
   }
-  const best = Math.max(...patterns.map((p) => p.strength));
-  return { score: Math.round(15 + best * 80), patterns };
+  const score = Math.max(...patterns.map((p) => p.score));
+  return { score, patterns };
 }
-
-// Linearly maps x from [0,1] and clamps the result - the shared building
-// block for every "cliff -> gradient" score below, so a value just short of
-// a threshold gets partial credit instead of the same score as "not close at all".
-function clamp01(x) { return Math.max(0, Math.min(1, x)); }
 
 // ---------- Support: how close is price to a well-tested recent low? ----------
 // floor = the single lowest low in the lookback window (currently the full
