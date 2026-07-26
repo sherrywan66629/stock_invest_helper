@@ -145,56 +145,118 @@ function rsi(closes, period = 14) {
   return out;
 }
 
-// ---------- Candlestick pattern detection (last bar context) ----------
+// ---------- Candlestick pattern detection (scans a recent window, not just the last bar) ----------
 function bodySize(b) { return Math.abs(b.close - b.open); }
 function range(b) { return b.high - b.low; }
 function lowerShadow(b) { return Math.min(b.open, b.close) - b.low; }
 function upperShadow(b) { return b.high - Math.max(b.open, b.close); }
 
+// How many recent trading days still count as "recent enough" for a named
+// pattern to matter - a hammer 3 days ago is still a relevant signal, not
+// just one that lands on the literal most recent candle.
+const PATTERN_LOOKBACK = 10;
+
 function detectPatterns(bars) {
   const n = bars.length;
-  const patterns = [];
-  const last = bars[n - 1], prev = bars[n - 2], prev2 = bars[n - 3];
+  const mostRecentByName = new Map();
+  const record = (name, strength, day) => {
+    const existing = mostRecentByName.get(name);
+    if (!existing || day > existing.day) mostRecentByName.set(name, { name, strength, day });
+  };
 
-  // Hammer: small body, long lower shadow (>=2x body), short upper shadow, in a downtrend
-  if (last && range(last) > 0) {
-    const body = bodySize(last);
-    const lowSh = lowerShadow(last);
-    const upSh = upperShadow(last);
-    if (body <= range(last) * 0.35 && lowSh >= body * 2 && upSh <= body * 0.6) {
-      patterns.push({ name: "锤子线 Hammer", strength: 0.6, day: last.date });
+  const start = Math.max(2, n - PATTERN_LOOKBACK);
+  for (let i = start; i < n; i++) {
+    const last = bars[i], prev = bars[i - 1], prev2 = bars[i - 2];
+
+    // Hammer: small body, long lower shadow (>=2x body), short upper shadow
+    if (range(last) > 0) {
+      const body = bodySize(last);
+      const lowSh = lowerShadow(last);
+      const upSh = upperShadow(last);
+      if (body <= range(last) * 0.35 && lowSh >= body * 2 && upSh <= body * 0.6) {
+        record("锤子线 Hammer", 0.6, last.date);
+      }
     }
-  }
-  // Doji: body very small relative to range
-  if (last && range(last) > 0 && bodySize(last) <= range(last) * 0.1) {
-    patterns.push({ name: "十字星 Doji", strength: 0.35, day: last.date });
-  }
-  // Bullish engulfing: prev red, last green, last body engulfs prev body
-  if (prev && last && prev.close < prev.open && last.close > last.open) {
-    if (last.open <= prev.close && last.close >= prev.open) {
-      patterns.push({ name: "看涨吞没 Bullish Engulfing", strength: 0.7, day: last.date });
+    // Doji: body very small relative to range
+    if (range(last) > 0 && bodySize(last) <= range(last) * 0.1) {
+      record("十字星 Doji", 0.35, last.date);
     }
-  }
-  // Morning star: big down day, small-body middle day (gap down), big up day closing into first candle's body
-  if (prev2 && prev && last) {
+    // Bullish engulfing: prev red, last green, last body engulfs prev body
+    if (prev.close < prev.open && last.close > last.open) {
+      if (last.open <= prev.close && last.close >= prev.open) {
+        record("看涨吞没 Bullish Engulfing", 0.7, last.date);
+      }
+    }
+    // Morning star: big down day, small-body middle day (gap down), big up day closing into first candle's body
     const day1Down = prev2.close < prev2.open && bodySize(prev2) > range(prev2) * 0.5;
     const day2Small = bodySize(prev) <= range(prev2) * 0.4;
     const day3Up = last.close > last.open && last.close >= (prev2.open + prev2.close) / 2;
     if (day1Down && day2Small && day3Up) {
-      patterns.push({ name: "启明星 Morning Star", strength: 0.85, day: last.date });
+      record("启明星 Morning Star", 0.85, last.date);
     }
   }
-  return patterns;
+  return Array.from(mostRecentByName.values());
+}
+
+// When no named pattern fires, give a continuous 0-30ish reading instead of a
+// flat floor, based on how the last few candles actually look: where the
+// close sits within the day's range (close near the high leans bullish) and
+// how small the body is relative to the range (smaller = more indecisive,
+// same spirit as a Doji but graduated instead of a hard cutoff).
+function baselineCandleScore(bars) {
+  const n = bars.length;
+  const window = bars.slice(Math.max(0, n - 3), n);
+  const perDay = window.map((b) => {
+    const r = range(b);
+    if (r <= 0) return 15;
+    const clv = ((b.close - b.low) - (b.high - b.close)) / r; // -1..+1, close position in range
+    const bodyRatio = bodySize(b) / r; // 0..1
+    const closeScore = ((clv + 1) / 2) * 15; // 0..15
+    const indecisionScore = (1 - Math.min(bodyRatio, 1)) * 15; // 0..15
+    return closeScore + indecisionScore;
+  });
+  return Math.round(perDay.reduce((a, b) => a + b, 0) / perDay.length);
+}
+
+function describeBaselineCandle(bars) {
+  const last = bars[bars.length - 1];
+  const r = range(last);
+  if (r <= 0) return "近期未检测到明显反转形态";
+  const clv = ((last.close - last.low) - (last.high - last.close)) / r;
+  const bodyRatio = bodySize(last) / r;
+  const lean = clv > 0.3 ? "收盘偏向当日高点" : clv < -0.3 ? "收盘偏向当日低点" : "收盘位于当日区间中部";
+  const bodyNote = bodyRatio < 0.3 ? "，实体较小、多空拉锯" : "";
+  return `近期未检测到明显反转形态（${lean}${bodyNote}）`;
 }
 
 // ---------- Scoring ----------
 function scoreCandlestick(bars) {
   const patterns = detectPatterns(bars);
-  if (patterns.length === 0) return { score: 15, patterns };
+  if (patterns.length === 0) {
+    return { score: baselineCandleScore(bars), patterns, baselineNote: describeBaselineCandle(bars) };
+  }
   const best = Math.max(...patterns.map((p) => p.strength));
   return { score: Math.round(15 + best * 80), patterns };
 }
 
+// Linearly maps x from [0,1] and clamps the result - the shared building
+// block for every "cliff -> gradient" score below, so a value just short of
+// a threshold gets partial credit instead of the same score as "not close at all".
+function clamp01(x) { return Math.max(0, Math.min(1, x)); }
+
+// ---------- Support: how close is price to a well-tested recent low? ----------
+// floor = the single lowest low in the lookback window (currently the full
+// 60-day window we fetch, since `lookback` defaults to 60 and we never fetch
+// more than 60 days - so this is effectively "the 60-day low").
+// distPct = how far above that floor the current close is, as a percentage
+// of the floor price. Smaller distPct = price is sitting right at its floor
+// right now (the interesting case for a bottoming setup); larger distPct =
+// price already rallied away from the low, so "is this a floor" is old news.
+// touches = how many of those days had a low within 3% of the floor - more
+// touches means the level has been tested repeatedly without breaking, which
+// reads as a sturdier floor than one that was only ever hit once.
+// Score = a base component from distPct (55/35/15, cliff-style) + 10 points
+// per touch capped at 4 touches (max 40) - so max possible is 55+40=95.
 function scoreSupport(bars, lookback = 60) {
   const n = bars.length;
   const win = bars.slice(Math.max(0, n - lookback), n);
@@ -202,7 +264,6 @@ function scoreSupport(bars, lookback = 60) {
   const floor = Math.min(...lows);
   const current = bars[n - 1].close;
   const distPct = ((current - floor) / floor) * 100;
-  // touches: how many bars came within 3% of the floor
   const touches = win.filter((b) => (b.low - floor) / floor <= 0.03).length;
   let score = 0;
   if (distPct <= 6) score += 55;
@@ -212,20 +273,58 @@ function scoreSupport(bars, lookback = 60) {
   return { score: Math.min(100, Math.round(score)), floor, distPct, touches };
 }
 
+// ---------- Volume: is selling drying up, and is buying showing up? ----------
+// Two independent continuous sub-scores, both scanning a recent window
+// instead of a single day, so a signal from a few days ago still counts:
+//
+// 1) "Shrinking" (0-35 pts): compares average volume on down-days in the
+//    last 10 days vs. the prior 20 days. shrinkRatio = recent / earlier.
+//    Full 35 pts at ratio <= 0.6 (down-day volume cut by 40%+), 0 pts at
+//    ratio >= 1.1 (no real shrinkage), linear in between. shrinkRatio > 1
+//    means down-day volume actually grew - still 0 pts, never negative.
+//
+// 2) "Spike on an up day" (0-45 pts): scans the last 10 days (not just the
+//    most recent one) for the single up-day whose volume was the largest
+//    multiple of ITS OWN trailing 20-day average volume (bestSpikeRatio).
+//    Full 45 pts at 2x average or more, 0 pts at 1x (no spike at all),
+//    linear in between.
+//
+// Base floor is 20, so total = 20 + shrinkScore + spikeScore, capped at 100.
+const VOLUME_SPIKE_LOOKBACK = 10;
+
 function scoreVolume(bars) {
   const n = bars.length;
   const recent = bars.slice(Math.max(0, n - 10), n);
   const earlier = bars.slice(Math.max(0, n - 30), Math.max(0, n - 10));
   const avgRecentDownVol = avgVolWhere(recent, (b) => b.close < b.open);
   const avgEarlierDownVol = avgVolWhere(earlier, (b) => b.close < b.open);
-  const shrinking = avgEarlierDownVol > 0 && avgRecentDownVol < avgEarlierDownVol * 0.85;
-  const last = bars[n - 1];
-  const avgVol20 = average(bars.slice(Math.max(0, n - 21), n - 1).map((b) => b.volume));
-  const spikeOnUpDay = last.close > last.open && last.volume > avgVol20 * 1.3;
-  let score = 20;
-  if (shrinking) score += 35;
-  if (spikeOnUpDay) score += 45;
-  return { score: Math.min(100, score), shrinking, spikeOnUpDay, avgRecentDownVol, avgEarlierDownVol };
+
+  let shrinkScore = 0;
+  let shrinkRatio = null;
+  if (avgEarlierDownVol > 0) {
+    shrinkRatio = avgRecentDownVol / avgEarlierDownVol;
+    shrinkScore = 35 * clamp01((1.1 - shrinkRatio) / (1.1 - 0.6));
+  }
+  const shrinking = shrinkRatio != null && shrinkRatio < 0.85;
+
+  let spikeScore = 0;
+  let bestSpikeRatio = null;
+  const spikeStart = Math.max(20, n - VOLUME_SPIKE_LOOKBACK);
+  for (let i = spikeStart; i < n; i++) {
+    const day = bars[i];
+    if (day.close <= day.open) continue; // only up days are candidates
+    const trailingAvgVol = average(bars.slice(i - 20, i).map((b) => b.volume));
+    if (trailingAvgVol <= 0) continue;
+    const ratio = day.volume / trailingAvgVol;
+    if (bestSpikeRatio == null || ratio > bestSpikeRatio) bestSpikeRatio = ratio;
+  }
+  if (bestSpikeRatio != null) {
+    spikeScore = 45 * clamp01((bestSpikeRatio - 1) / (2 - 1));
+  }
+  const spikeOnUpDay = bestSpikeRatio != null && bestSpikeRatio > 1.3;
+
+  const score = Math.round(Math.min(100, 20 + shrinkScore + spikeScore));
+  return { score, shrinking, spikeOnUpDay, shrinkRatio, bestSpikeRatio };
 }
 function avgVolWhere(arr, pred) {
   const f = arr.filter(pred);
@@ -234,6 +333,21 @@ function avgVolWhere(arr, pred) {
 }
 function average(arr) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0; }
 
+// ---------- Trend: has the down-move lost steam and started turning? ----------
+// Three continuous sub-scores stacked on a base floor of 20:
+//
+// 1) "Oversold" (0-20 pts): how deep into oversold territory RSI(14) is.
+//    Full 20 pts at RSI <= 25 (deeply oversold), 0 pts at RSI >= 45, linear
+//    in between - not a hard "<40 or nothing" cutoff.
+//
+// 2) "Recovering from oversold" (0-25 pts): how much RSI has risen over the
+//    last 5 trading days, only while RSI is still below 55 (past that it's
+//    not an early recovery anymore, just... an uptrend). Full 25 pts at a
+//    10+ point RSI rise in 5 days, 0 pts at no rise, linear in between.
+//
+// 3) "MA20 turning up" (0-25 pts): the 20-day moving average's slope over
+//    the last 5 trading days, as a percentage of its own level. Full 25 pts
+//    at +2% or more, 0 pts at flat or falling, linear in between.
 function scoreTrend(bars) {
   const closes = bars.map((b) => b.close);
   const n = closes.length;
@@ -241,18 +355,33 @@ function scoreTrend(bars) {
   const lastRSI = rsiArr[n - 1];
   const ma20now = sma(closes, 20, n - 1);
   const ma20prev = sma(closes, 20, Math.max(19, n - 6));
-  const ma50 = sma(closes, 50, n - 1);
-  let score = 20;
-  let oversoldRecovering = false;
+
+  let oversoldScore = 0;
   if (lastRSI != null) {
-    if (lastRSI < 40) score += 20;
-    // recovering: RSI now higher than 5 bars ago while still low-ish
-    const rsiPrev = rsiArr[Math.max(14, n - 6)];
-    if (rsiPrev != null && lastRSI > rsiPrev && lastRSI < 55) { score += 25; oversoldRecovering = true; }
+    oversoldScore = 20 * clamp01((45 - lastRSI) / (45 - 25));
   }
+
+  let recoverScore = 0;
+  let oversoldRecovering = false;
+  if (lastRSI != null && lastRSI < 55) {
+    const rsiPrev = rsiArr[Math.max(14, n - 6)];
+    if (rsiPrev != null) {
+      const rsiRise = lastRSI - rsiPrev;
+      recoverScore = 25 * clamp01(rsiRise / 10);
+      oversoldRecovering = rsiRise > 0;
+    }
+  }
+
+  let maScore = 0;
   let ma20TurningUp = false;
-  if (ma20now != null && ma20prev != null && ma20now > ma20prev) { score += 25; ma20TurningUp = true; }
-  return { score: Math.min(100, Math.round(score)), lastRSI, ma20now, ma50, oversoldRecovering, ma20TurningUp };
+  if (ma20now != null && ma20prev != null) {
+    const slopePct = ((ma20now - ma20prev) / ma20prev) * 100;
+    maScore = 25 * clamp01(slopePct / 2);
+    ma20TurningUp = slopePct > 0;
+  }
+
+  const score = Math.round(Math.min(100, 20 + oversoldScore + recoverScore + maScore));
+  return { score, lastRSI, oversoldRecovering, ma20TurningUp };
 }
 
 // Score -> bull/amber/bear color, used to color-code each factor at a glance
@@ -261,36 +390,40 @@ function scoreColor(v) {
   return v >= 65 ? C.bull : v >= 40 ? C.amber : C.bear;
 }
 
-// Plain-language "what this measures" copy, shown for every factor regardless of score
+// Plain-language "what this measures" copy, written for someone with zero
+// investing background - shown for every factor regardless of score.
 const FACTOR_DEFINITIONS = {
-  candle: "衡量最近几天的K线形状，有没有出现历史上和止跌相关的经典图形（比如锤子线、启明星）。反映的是价格图形本身的信号。",
-  support: "衡量现价离近期最低点有多远，以及这个低点区域被反复测试而没跌破的次数。反映的是这个价位有没有人愿意接盘。",
-  volume: "衡量下跌时成交量（当天参与买卖的股数）有没有逐渐变小，反弹时成交量有没有明显放大。反映的是有没有真金白银的资金在进场。",
-  trend: "衡量RSI指标（过去14天涨跌力度的对比，0-100）是否处于超卖区并开始回升，以及20日均线是否转向上。反映的是这轮下跌的速度有没有开始变慢。",
+  candle: `看的是：把每天的开盘价、收盘价、最高价、最低价画成一根根"蜡烛"（K线），最近这几天有没有出现历史上和"卖压耗尽、有人开始接盘"相关的经典形状——比如下影线很长的锤子线、连续几天先大跌、再企稳、再反弹的启明星。`,
+  support: `看的是：现价离最近 60 个交易日里的最低点有多远，以及这个低点附近被反复"跌到就有人接、总也跌不破"的次数。跌到同一个价位却总也跌不破，说明可能有实质买盘在那个位置接手，是相对扎实的价格支撑。`,
+  volume: `看的是：成交量（当天有多少股票被买卖）的变化——下跌的时候，参与卖出的量是不是在逐渐变小（说明想卖的人越来越少）；上涨的时候，有没有某天成交量明显放大（说明有真金白银在买入，不只是零星反弹）。`,
+  trend: `看的是两个技术指标：① RSI——一个 0-100 的数字，衡量最近 14 天里"涨的力度"和"跌的力度"谁更强，数值越低说明跌得越"过头"；② 20日均线——最近 20 个交易日收盘价的平均值，用来看股价近期的大方向有没有从向下转成向上。`,
 };
 
-// Score-bucket interpretation copy, tailored to what each factor actually measures
+// Score-bucket interpretation copy, tailored to what each factor actually
+// measures. Low-score buckets deliberately reassure that a low score means
+// "this signal hasn't shown up yet", not "the stock will keep falling" -
+// each factor is independent evidence, not a prediction.
 function interpretScore(key, value) {
   const buckets = {
     candle: [
-      [30, "低分：近期没有出现明显的反转图形，形态层面暂时没有确认信号（不代表不会出现，只是现在还没看到）。"],
-      [60, "中等：出现了一定的反转迹象，但强度或规模有限，还不算强确认。"],
-      [101, "高分：出现了较强的经典反转形态组合，形态层面确认信号较强。"],
+      [30, `低分：最近的K线还没出现这些经典反转形状——不代表股价接下来一定还会跌，只是"图形上"暂时没看到卖压耗尽的迹象，可以再观察几天。`],
+      [60, `中等：K线图形上出现了一定的止跌迹象，具体是哪种形状可以看上面的"当前读数"；强度或确认度有限，建议再结合其他因子一起判断。`],
+      [101, "高分：出现了较强的经典反转形态组合，图形层面释放的止跌信号比较明确。"],
     ],
     support: [
-      [30, "低分：现价离近期低点还比较远，或者反复跌破同一区域，说明这个价位还没形成有效支撑。"],
-      [60, "中等：价格在低点附近有一定支撑，但测试次数还不多，稳固程度一般。"],
-      [101, "高分：价格反复测试同一低点区域都没有跌破，说明这个价位的支撑相对扎实。"],
+      [30, `低分：现价离最近的低点还比较远，或者这个价位被反复跌破，还没能形成稳固支撑，具体数值见上面的"当前读数"。`],
+      [60, `中等：这个价位已经显示出一定支撑力，但离低点的距离或被测试的次数还不够充分，具体数值见上面的"当前读数"。`],
+      [101, "高分：价格反复测试同一低点区域都没有跌破，说明这个价位有人愿意接盘，支撑相对扎实。"],
     ],
     volume: [
-      [30, "低分：下跌没有缩量，反弹也没有放量，还看不到资金转向的迹象。"],
-      [60, "中等：只出现了一半信号（比如下跌缩量了，但反弹没放量；或者相反），说明卖压在减弱，但买盘还没明显跟上。"],
-      [101, "高分：下跌缩量、反弹放量同时出现，说明有实际资金在进场接盘，信号相对完整。"],
+      [30, `低分：下跌时成交量没有明显缩小，上涨时也没看到放量买入，目前还看不出资金转向的迹象，具体数值见上面的"当前读数"。`],
+      [60, `中等：出现了一定的资金转向迹象（缩量或放量至少有一项），但还不够充分或不完整，具体可以看上面的"当前读数"。`],
+      [101, "高分：下跌缩量、反弹放量同时出现，说明有实际资金在这个位置进场接盘，信号相对完整可信。"],
     ],
     trend: [
-      [30, "低分：还没进入超卖区，或者价格/均线依然偏弱，下跌的速度还没有减慢的迹象。"],
-      [60, "中等：已经进入超卖区（跌得比较急了），但还没看到RSI回升或均线拐头这类喘气动作的确认。"],
-      [101, "高分：超卖后已经出现回升，均线也开始转向上，说明下跌动能减弱的证据比较充分。"],
+      [30, `低分：目前还看不到明显的止跌迹象——RSI、均线暂时都没有转强的信号，具体可以看上面的"当前读数"。`],
+      [60, `中等：出现了一部分止跌迹象（RSI走低、开始回升、或均线企稳中的一项或几项），但没有同时出现，确认力度一般，具体可以看上面的"当前读数"。`],
+      [101, "高分：RSI从超卖区回升，20日均线也同时转向上，多个信号同时出现，下跌动能减弱的证据比较充分。"],
     ],
   };
   const rules = buckets[key];
@@ -487,6 +620,7 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
             <div>
               <div style={{ color: C.textMuted, fontSize: 12, lineHeight: 1.6, marginBottom: 16 }}>
                 以下四项因子相互独立，请分别参考，本工具不再合成单一分数——避免用一个数字掩盖不同维度之间的分歧。
+                四项分数的方向是一致的：<strong style={{ color: C.text }}>分数越高，代表这一项看到的"止跌"证据越强；分数低不代表股价一定还会继续跌，只是这一项暂时还没看到支持止跌的信号，可能需要再观察，或者参考其他几项。</strong>
               </div>
 
               <FactorBar
@@ -494,7 +628,7 @@ function TickerPanel({ ticker, state, updateState, onClose }) {
                 label="K线形态"
                 value={results.cs.score}
                 color={scoreColor(results.cs.score)}
-                note={results.cs.patterns.length ? results.cs.patterns.map((p) => p.name).join("、") : "近期未检测到明显反转形态"}
+                note={results.cs.patterns.length ? results.cs.patterns.map((p) => p.name).join("、") : results.cs.baselineNote}
               />
               <FactorBar
                 factorKey="support"
