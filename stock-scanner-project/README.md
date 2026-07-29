@@ -75,7 +75,7 @@ Yahoo Finance 图表接口
 ```
 stock-scanner-project/
 ├── src/
-│   ├── App.jsx          # 唯一的前端组件：观察列表 + 单只股票分析面板 + 四项打分逻辑
+│   ├── App.jsx          # 应用外壳（左侧多 Tab 导航）+ 各 Tab 内容 + 四项打分逻辑，见下方"多 Tab 结构"
 │   ├── main.jsx          # React 应用入口
 │   └── index.css         # 全局样式（Tailwind）
 │   └── ticker-cache.js    # localStorage 缓存工具（6 小时滑动过期 + 每 PST 日强制清空）
@@ -90,9 +90,23 @@ stock-scanner-project/
 
 ---
 
+## 多 Tab 结构
+
+应用现在是一个左侧导航 + 右侧内容区的多 Tab 壳子，不再是单页面：
+
+- `App`（[`src/App.jsx`](src/App.jsx)）只负责壳子本身：渲染 `Sidebar` 导航栏 + 根据当前选中的 Tab 渲染对应内容组件，自己不持有任何业务状态
+- `TABS` 是一个数组，每一项是 `{ key, label, icon, Component }`——**新增一个 Tab，只需要在这个数组里加一行**，不需要动布局代码
+- 每个 Tab 的组件（比如 `WatchlistTab`）自己管理自己的状态（股票列表、缓存、加载状态等），Tab 之间互不影响、互不共享状态
+- 当前两个 Tab：
+  - **关注股票止跌形态**（`WatchlistTab`）：原来唯一的功能页面，观察列表 + 单只股票的四项因子分析，逻辑不变
+  - **Seeking Alpha 下半年选股**（`SeekingAlphaTab`）：目前只是一个占位页面（"功能开发中"），还没有实际功能
+- 切换 Tab 是纯前端状态（`useState`），不改变 URL——刷新页面会回到第一个 Tab，几个 Tab 之间也不能通过链接分享；如果之后需要"直接分享某个 Tab 的链接"，需要引入路由（比如 `react-router`）把 Tab 和 URL 绑定，目前还没做
+
+---
+
 ## 请求是怎么串起来的（以点击一个股票代码为例）
 
-1. 用户点击观察列表里的某个股票代码，`TickerPanel` 组件挂载，触发 `handleFetchLive`（[`src/App.jsx`](src/App.jsx)）
+1. 用户在"关注股票止跌形态"这个 Tab 里点击观察列表里的某个股票代码，`TickerPanel` 组件挂载，触发 `handleFetchLive`（[`src/App.jsx`](src/App.jsx)）
 2. **先查本地缓存**（[`src/ticker-cache.js`](src/ticker-cache.js) 的 `getCachedBars`）：命中且未过期就直接用缓存数据渲染，不发请求；否则才继续下一步
 3. 前端发起 `fetch('/api/quote?ticker=AAPL')`
 4. **生产环境**：Cloudflare 路由到 `functions/api/quote.js` 的 `onRequestGet`；**本地环境**：Vite 中间件拦截同一路径
@@ -168,4 +182,6 @@ npm run lint       # 运行 oxlint 代码检查
 - **观察列表本身不持久化**：股票代码列表仍然只存在内存里，刷新页面会恢复成默认列表（已抓取的行情数据有 localStorage 缓存，但列表本身没有）
 - **Yahoo Finance 是非官方接口**：没有 SLA 保证，未来可能变化或限流
 - **Pages Function 完全无状态**：每次请求可能是全新的 V8 隔离环境，不能用普通 JS 变量做跨请求缓存；现有的 6 小时缓存是纯前端 localStorage 方案，不涉及后端存储
-- **候选迭代方向**：观察列表持久化（localStorage）、更稳定的数据源、给分析结果加历史走势图表
+- **Seeking Alpha 下半年选股 Tab 目前只是 UI 占位**：还没有实际的数据获取/分析逻辑
+- **Tab 切换不反映在 URL 上**：刷新页面会回到默认 Tab，无法通过链接直接分享某个 Tab
+- **候选迭代方向**：观察列表持久化（localStorage）、更稳定的数据源、给分析结果加历史走势图表、给 Seeking Alpha Tab 补上实际功能、Tab 状态接入 URL 路由

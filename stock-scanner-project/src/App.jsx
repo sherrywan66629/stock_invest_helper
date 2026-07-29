@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
-import { TrendingDown, TrendingUp, BarChart3, Gauge, AlertTriangle, Upload, PlayCircle, X, Plus, RefreshCw, Loader2 } from "lucide-react";
+import { TrendingUp, Gauge, AlertTriangle, Upload, PlayCircle, X, Plus, RefreshCw, Loader2 } from "lucide-react";
 import { getCachedBars, setCachedBars, clearCache, msUntilNextPstMidnight } from "./ticker-cache.js";
 
 // ---------- Design tokens ----------
@@ -794,7 +794,8 @@ function hydrateFromCache(tickers) {
   return initial;
 }
 
-export default function App() {
+// ---------- Tab: 关注股票止跌形态 (the original single-tab tool) ----------
+function WatchlistTab() {
   const [tickers, setTickers] = useState(DEFAULT_TICKERS);
   const [tickerStates, setTickerStates] = useState(() => hydrateFromCache(DEFAULT_TICKERS));
   const [activeTicker, setActiveTicker] = useState(null);
@@ -865,8 +866,8 @@ export default function App() {
   };
 
   return (
-    <div style={{ background: C.bg, minHeight: "100vh", ...sans, position: "relative", overflow: "hidden" }}>
-      {/* ---- Home page: watchlist ---- */}
+    <div style={{ ...sans, position: "relative", minHeight: "100%" }}>
+      {/* ---- Watchlist ---- */}
       <div style={{ padding: 24, maxWidth: 900, margin: "0 auto" }}>
         <div className="flex items-center gap-2 mb-1">
           <Gauge size={22} color={C.gold} />
@@ -944,6 +945,78 @@ export default function App() {
             onClose={() => setActiveTicker(null)}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Tab: Seeking Alpha 下半年选股 (placeholder - UI shell only for now) ----------
+function SeekingAlphaTab() {
+  return (
+    <div style={{ ...sans, height: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div style={{ textAlign: "center", maxWidth: 360 }}>
+        <TrendingUp size={28} color={C.textMuted} style={{ marginBottom: 12 }} />
+        <div style={{ color: C.text, fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Seeking Alpha 下半年选股</div>
+        <div style={{ color: C.textMuted, fontSize: 12, lineHeight: 1.6 }}>功能开发中，敬请期待。</div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Tab registry: add a new tab here (label + icon + component) ----------
+const TABS = [
+  { key: "watchlist", label: "关注股票止跌形态", icon: Gauge, Component: WatchlistTab },
+  { key: "seeking-alpha", label: "Seeking Alpha 下半年选股", icon: TrendingUp, Component: SeekingAlphaTab },
+];
+
+// ---------- Left-hand nav sidebar ----------
+function Sidebar({ activeTab, onSelect }) {
+  return (
+    <nav
+      style={{
+        width: 224, flexShrink: 0, background: C.panel, borderRight: `1px solid ${C.border}`,
+        height: "100vh", position: "sticky", top: 0, boxSizing: "border-box",
+        padding: "20px 12px", display: "flex", flexDirection: "column", gap: 4,
+      }}
+    >
+      <div className="flex items-center gap-2" style={{ padding: "0 8px", marginBottom: 22 }}>
+        <Gauge size={20} color={C.gold} />
+        <span style={{ ...sans, color: C.text, fontSize: 15, fontWeight: 700 }}>选股工具箱</span>
+      </div>
+      {TABS.map(({ key, label, icon: Icon }) => {
+        const active = key === activeTab;
+        return (
+          <button
+            key={key}
+            onClick={() => onSelect(key)}
+            className="flex items-center gap-2"
+            style={{
+              ...sans, textAlign: "left", cursor: "pointer",
+              background: active ? C.panelAlt : "transparent",
+              color: active ? C.text : C.textMuted,
+              border: `1px solid ${active ? C.border : "transparent"}`,
+              borderRadius: 8, padding: "10px 10px", fontSize: 13, fontWeight: active ? 600 : 500,
+            }}
+          >
+            <Icon size={16} color={active ? C.gold : C.textMuted} style={{ flexShrink: 0 }} />
+            {label}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+// ---------- App shell: sidebar + active tab's content ----------
+export default function App() {
+  const [activeTab, setActiveTab] = useState(TABS[0].key);
+  const ActiveComponent = TABS.find((t) => t.key === activeTab).Component;
+
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh", display: "flex" }}>
+      <Sidebar activeTab={activeTab} onSelect={setActiveTab} />
+      <div style={{ flex: 1, height: "100vh", overflowY: "auto", position: "relative" }}>
+        <ActiveComponent />
       </div>
     </div>
   );
