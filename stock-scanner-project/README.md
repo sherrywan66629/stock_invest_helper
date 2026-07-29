@@ -78,12 +78,13 @@ stock-scanner-project/
 │   ├── App.jsx          # 应用外壳（左侧多 Tab 导航）+ 各 Tab 内容 + 四项打分逻辑，见下方"多 Tab 结构"
 │   ├── main.jsx          # React 应用入口
 │   └── index.css         # 全局样式（Tailwind）
-│   └── ticker-cache.js    # localStorage 缓存工具（6 小时滑动过期 + 每 PST 日强制清空）
+│   └── ticker-cache.js    # localStorage 缓存工具（默认 6 小时滑动过期 + 每 PST 日强制清空，可按key覆盖 ttlMs/slide）
 ├── functions/
 │   ├── _yahoo.js          # 抓取 Yahoo Finance 数据的核心逻辑（本地/线上共用，下划线开头不会被当作路由）
 │   └── api/
-│       └── quote.js       # Cloudflare Pages Function，对应线上路由 /api/quote
-├── vite.config.js         # Vite 配置；额外注册了本地开发用的 /api/quote 模拟中间件
+│       ├── quote.js       # Cloudflare Pages Function，对应线上路由 /api/quote（日线数据，止跌扫描器 + Seeking Alpha 历史图表都用）
+│       └── price.js       # Cloudflare Pages Function，对应线上路由 /api/price（轻量当前价查询，仅 Seeking Alpha Tab 用）
+├── vite.config.js         # Vite 配置；额外注册了本地开发用的 /api/quote、/api/price 模拟中间件
 ├── index.html             # 页面入口 HTML
 └── package.json           # 依赖声明 + npm scripts
 ```
@@ -99,7 +100,7 @@ stock-scanner-project/
 - 每个 Tab 的组件（比如 `WatchlistTab`）自己管理自己的状态（股票列表、缓存、加载状态等），Tab 之间互不影响、互不共享状态
 - 当前两个 Tab：
   - **关注股票止跌形态**（`WatchlistTab`）：原来唯一的功能页面，观察列表 + 单只股票的四项因子分析，逻辑不变
-  - **Seeking Alpha 下半年选股**（`SeekingAlphaTab`）：目前只是一个占位页面（"功能开发中"），还没有实际功能
+  - **Seeking Alpha 下半年选股**（`SeekingAlphaTab`）：Seeking Alpha 给出的 2026 下半年 10 只精选个股（名单和点评文字是手动整理进代码的静态数据，见 `SEEKING_ALPHA_2026H2`），每只股票展示当前股价、过去 1 年走势图（手写 SVG 折线，没有引入图表库），以及 1周/1月/3月/6月/1年 的涨跌幅，见下文"Seeking Alpha Tab 的数据是怎么来的"
 - 切换 Tab 是纯前端状态（`useState`），不改变 URL——刷新页面会回到第一个 Tab，几个 Tab 之间也不能通过链接分享；如果之后需要"直接分享某个 Tab 的链接"，需要引入路由（比如 `react-router`）把 Tab 和 URL 绑定，目前还没做
 
 ---
@@ -114,6 +115,24 @@ stock-scanner-project/
 6. 数据以 JSON 形式返回给前端，写入本地缓存（`setCachedBars`）
 7. 前端把数据转成 CSV 格式塞进 `parseCSV`，再依次跑 `scoreCandlestick`、`scoreSupport`、`scoreVolume`、`scoreTrend` 四个函数算出四项因子分数
 8. 四项分数**分别**渲染出来（观察列表卡片是 2×2 的小方块，详情面板是四条独立的因子明细）——不合成单一的综合分数，颜色按各自分数高低单独区分好坏
+
+---
+
+## Seeking Alpha Tab 的数据是怎么来的
+
+这个 Tab 复用了同一个 `/api/quote` 接口和同一套 Yahoo Finance 抓取逻辑（`functions/_yahoo.js`），但请求参数和用途不一样：
+
+- 止跌扫描器 Tab 请求 `/api/quote?ticker=AAPL`（不带 `range`，默认 `range=6mo`），拿到的是**最近 60 个交易日**、给四项因子打分用的
+- Seeking Alpha Tab 请求 `/api/quote?ticker=CRDO&range=1y`，拿到的是 Yahoo **一年区间返回的全部日线数据**（不截断到 60 条），只用来画走势图和算区间涨跌幅，不跑四项因子打分
+- `functions/_yahoo.js` 的 `fetchYahooBars(ticker, { range, limit })` 支持两种调用方式：`limit: 60`（默认，止跌扫描器用）会把结果裁到最后 60 条；`limit: null`（Seeking Alpha 用）原样返回 Yahoo 给的全部数据
+- 涨跌幅（1周/1月/3月/6月）用**交易日数**近似（5/21/63/126 个交易日），不是按自然日精确对齐节假日；1年涨跌幅直接用这批一年数据里第一条和最后一条的收盘价算，因为拿到的数据本身就是"最近一年"
+- 应用启动进入这个 Tab 时会给 10 只股票依次发起后台请求（错峰 150ms 一个，原因同止跌扫描器的观察列表自动加载），每张卡片上的刷新按钮可以单独强制刷新某一只
+
+**卡片顶部的"当前股价"是单独一条请求，不是从上面这批一年数据里取最后一条**——因为这批一年数据默认按 6 小时缓存（见下文"数据缓存"），如果拿它的最后一条当"当前价"，波动大的股票在这 6 小时里显示的价格会明显滞后于实际走势。所以：
+
+- 走势图和涨跌幅：仍然用 `/api/quote?ticker=X&range=1y` 这批数据，缓存 6 小时（历史数据，不要求分钟级新鲜度）
+- 卡片顶部的"当前股价"：单独请求 `/api/price?ticker=X`（新增的 `functions/api/price.js`），只读 Yahoo 返回的 `meta.regularMarketPrice` 这一个字段，不解析整年的日线数据；缓存策略也不一样，见下文
+- 这两个数值来自两次独立请求，正常情况下会有几美分到几美元的出入（取决于当天波动），这是预期行为，不是 bug
 
 ---
 
@@ -137,6 +156,8 @@ stock-scanner-project/
 - **每 PST 日强制清空**：不管滑动窗口有没有到期，太平洋时间每天 00:00 都会把整个缓存清空重来——包括页面一直开着跨过午夜的情况（`App` 组件里用 `setTimeout` 精确调度到下一个 PST 零点）
 - 应用启动时会用缓存里还没过期的数据，直接把观察列表卡片的分数渲染出来，不用逐个点开
 - 点"刷新数据"按钮会绕过缓存、强制发起真实请求；缓存命中时面板上会标注"（本地缓存，6小时内）"
+- Seeking Alpha Tab 的一年数据复用同一套缓存机制，但用 `"TICKER@1y"`（比如 `"CRDO@1y"`）而不是 `"TICKER"` 作为缓存key，避免和止跌扫描器的 60 条数据相互覆盖
+- Seeking Alpha Tab 的"当前股价"用的是**另一套更短的缓存策略**：`"TICKER@price"` 这个key，**30 分钟固定过期，不滑动**——`src/ticker-cache.js` 的 `getCachedBars` 支持传 `{ ttlMs, slide: false }` 覆盖默认的 6 小时/滑动策略，就是给这个用例加的。"不滑动"意味着即使这 30 分钟里被反复查看，也不会像默认策略那样每次续期——到点就必须重新请求，不会因为频繁打开这个 Tab 而变相延长缓存寿命
 
 **观察列表自动加载**：应用启动时（以及每次新增股票代码时），会自动为**没有有效缓存**的股票代码依次发起后台请求，不需要用户点开每个面板去触发。要点：
 
@@ -182,6 +203,7 @@ npm run lint       # 运行 oxlint 代码检查
 - **观察列表本身不持久化**：股票代码列表仍然只存在内存里，刷新页面会恢复成默认列表（已抓取的行情数据有 localStorage 缓存，但列表本身没有）
 - **Yahoo Finance 是非官方接口**：没有 SLA 保证，未来可能变化或限流
 - **Pages Function 完全无状态**：每次请求可能是全新的 V8 隔离环境，不能用普通 JS 变量做跨请求缓存；现有的 6 小时缓存是纯前端 localStorage 方案，不涉及后端存储
-- **Seeking Alpha 下半年选股 Tab 目前只是 UI 占位**：还没有实际的数据获取/分析逻辑
+- **Seeking Alpha 的选股名单和点评是手动写死在代码里的静态数据**（`SEEKING_ALPHA_2026H2`），不会自动更新——如果 Seeking Alpha 出新一期名单，需要手动改代码
+- **涨跌幅按交易日数近似**：1周/1月/3月/6月分别按 5/21/63/126 个交易日回溯，不是按自然日精确匹配，遇到长假可能有一两天的误差
 - **Tab 切换不反映在 URL 上**：刷新页面会回到默认 Tab，无法通过链接直接分享某个 Tab
-- **候选迭代方向**：观察列表持久化（localStorage）、更稳定的数据源、给分析结果加历史走势图表、给 Seeking Alpha Tab 补上实际功能、Tab 状态接入 URL 路由
+- **候选迭代方向**：观察列表持久化（localStorage）、更稳定的数据源、给止跌扫描器的分析结果也加历史走势图表、Seeking Alpha 名单支持在 UI 里编辑而不是改代码、Tab 状态接入 URL 路由

@@ -950,14 +950,287 @@ function WatchlistTab() {
   );
 }
 
-// ---------- Tab: Seeking Alpha 下半年选股 (placeholder - UI shell only for now) ----------
-function SeekingAlphaTab() {
+// ---------- Tab: Seeking Alpha 下半年选股 ----------
+// Static picklist - Seeking Alpha's 2026 下半年 10-stock selection, with the
+// user-provided thesis broken into structured fields for the UI. This is
+// hand-curated content, not derived from any API - update it by editing this
+// array if the picklist changes.
+const SEEKING_ALPHA_2026H2 = [
+  { ticker: "CRDO", name: "Credo Technology", sector: "半导体 · AI数据中心互连",
+    thesis: "AI数据中心“高速互连”核心供应商",
+    detail: "AEC（有源电缆）+ 铜缆 + 光互连三条产品线同时放量，FY2027 营收预期同比增长超80%，是AI基建扩张里的“卖水人”角色。" },
+  { ticker: "LITE", name: "Lumentum Holdings", sector: "半导体 · 光通信/硅光子",
+    thesis: "光通信 + 硅光子龙头",
+    detail: "英伟达直接投资20亿美元，AI网络架构正从电互连转向光互连，Lumentum 是这一转向里最大的受益方之一。" },
+  { ticker: "TTMI", name: "TTM Technologies", sector: "电子制造 · 高端PCB/国防",
+    thesis: "高端PCB + 国防 + 数据中心",
+    detail: "数据中心业务同比暴涨61%，同时吃军工订单和制造业回流红利，双引擎驱动。" },
+  { ticker: "SNDK", name: "SanDisk", sector: "半导体 · 存储(NAND)",
+    thesis: "NAND存储周期反转标的",
+    detail: "AI存储需求 + 涨价 + 长协改善，盈利爆发力极强，是这一轮存储周期拐点里弹性较大的选手。" },
+  { ticker: "STRL", name: "Sterling Infrastructure", sector: "工程建筑 · 数据中心/晶圆厂基建",
+    thesis: "数据中心 & 晶圆厂“包工头”",
+    detail: "场地开发、基建工程订单积压创纪录，AI数据中心相关业务占比还在提升，是实打实的硬需求。" },
+  { ticker: "VICR", name: "Vicor Corporation", sector: "半导体 · 电源管理",
+    thesis: "AI芯片“最后一英寸”供电方案商",
+    detail: "48V垂直供电技术稀缺性拉满，订单和授权收入明显提速，解决AI芯片供电痛点的“小而美”标的。" },
+  { ticker: "SEZL", name: "Sezzle", sector: "金融科技 · BNPL(先买后付)",
+    thesis: "高增长BNPL金融科技",
+    detail: "订阅用户、GMV、利润率齐升，但风险偏好较高，波动大，适合激进型选手。" },
+  { ticker: "DAVE", name: "Dave Inc.", sector: "金融科技 · 数字银行/现金预支",
+    thesis: "次级客群数字银行 + 现金预支",
+    detail: "增长猛、空头比例高、估值偏贵，属于多空博弈激烈的品种。" },
+  { ticker: "PACS", name: "PACS Group", sector: "医疗保健 · 专业护理/康复",
+    thesis: "专业护理 + 康复机构运营商",
+    detail: "老龄化 + 入住率提升 + 并购扩张，防御型配置，波动小，长线逻辑相对稳健。" },
+  { ticker: "AMZN", name: "Amazon.com", sector: "大盘科技 · 电商/云计算",
+    thesis: "名单里确定性最高的大盘股",
+    detail: "AWS 吃生成式AI红利，电商 + 广告 + 流媒体多元 buff 加持，是名单里的“压舱石”。" },
+];
+
+// Trading-day lookback windows for each return period shown per stock -
+// standard approximation (~21 trading days/month) since exact calendar-day
+// alignment would need holiday-aware date matching for little practical gain.
+// "1y" is null because the bars array itself is already exactly the fetched
+// 1-year range, so its first bar IS the 1-year-ago anchor.
+const RETURN_PERIODS = [
+  { key: "1w", label: "1周", days: 5 },
+  { key: "1m", label: "1月", days: 21 },
+  { key: "3m", label: "3月", days: 63 },
+  { key: "6m", label: "6月", days: 126 },
+  { key: "1y", label: "1年", days: null },
+];
+
+function pctChangeOverDays(bars, tradingDaysAgo) {
+  const n = bars.length;
+  if (n < 2) return null;
+  const idx = tradingDaysAgo == null ? 0 : Math.max(0, n - 1 - tradingDaysAgo);
+  const from = bars[idx].close;
+  const to = bars[n - 1].close;
+  if (!from) return null;
+  return ((to - from) / from) * 100;
+}
+
+// Fetches a full ~1-year daily-bar history (unsliced, unlike the 60-bar 6mo
+// fetch the scanner tab uses) - namespaced under "TICKER@1y" in the shared
+// localStorage cache so it never collides with that tab's 60-bar entries.
+async function fetchQuote1y(ticker) {
+  const resp = await fetch(`/api/quote?ticker=${encodeURIComponent(ticker)}&range=1y`);
+  let data;
+  try {
+    data = await resp.json();
+  } catch {
+    throw new Error("获取数据失败：接口返回格式异常");
+  }
+  if (!resp.ok) throw new Error(data.error || "获取数据失败");
+  return data.bars;
+}
+
+async function load1yTickerData(ticker, { force = false } = {}) {
+  const cacheKey = `${ticker}@1y`;
+  if (!force) {
+    const cached = getCachedBars(cacheKey);
+    if (cached) return { bars: cached, fetchedAt: new Date().toISOString(), fromCache: true };
+  }
+  const bars = await fetchQuote1y(ticker);
+  setCachedBars(cacheKey, bars);
+  return { bars, fetchedAt: new Date().toISOString(), fromCache: false };
+}
+
+// Current price refreshes on its own, much shorter cadence than the 1-year
+// chart data above - a stock can move several percent within a day, so
+// reusing the same 6h/sliding cache for "what's it trading at right now"
+// would show a visibly stale number for most of that window. 30 min, and
+// NOT sliding (slide: false) - it goes stale on a fixed schedule regardless
+// of how often the card gets re-viewed, rather than resetting every time
+// someone looks at it.
+const PRICE_TTL_MS = 30 * 60 * 1000;
+
+async function fetchCurrentPrice(ticker) {
+  const resp = await fetch(`/api/price?ticker=${encodeURIComponent(ticker)}`);
+  let data;
+  try {
+    data = await resp.json();
+  } catch {
+    throw new Error("获取股价失败：接口返回格式异常");
+  }
+  if (!resp.ok) throw new Error(data.error || "获取股价失败");
+  return { price: data.price, asOf: data.asOf };
+}
+
+async function loadCurrentPrice(ticker, { force = false } = {}) {
+  const cacheKey = `${ticker}@price`;
+  if (!force) {
+    const cached = getCachedBars(cacheKey, { ttlMs: PRICE_TTL_MS, slide: false });
+    if (cached) return cached;
+  }
+  const value = await fetchCurrentPrice(ticker);
+  setCachedBars(cacheKey, value);
+  return value;
+}
+
+// Minimal hand-rolled line chart (no charting library in this project) -
+// normalizes closes into the viewBox and draws a single polyline.
+function Sparkline({ bars, color, height = 56 }) {
+  if (!bars || bars.length < 2) return null;
+  const width = 320;
+  const closes = bars.map((b) => b.close);
+  const min = Math.min(...closes);
+  const max = Math.max(...closes);
+  const span = max - min || 1;
+  const points = closes
+    .map((c, i) => {
+      const x = (i / (closes.length - 1)) * width;
+      const y = height - ((c - min) / span) * height;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
   return (
-    <div style={{ ...sans, height: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-      <div style={{ textAlign: "center", maxWidth: 360 }}>
-        <TrendingUp size={28} color={C.textMuted} style={{ marginBottom: 12 }} />
-        <div style={{ color: C.text, fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Seeking Alpha 下半年选股</div>
-        <div style={{ color: C.textMuted, fontSize: 12, lineHeight: 1.6 }}>功能开发中，敬请期待。</div>
+    <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} preserveAspectRatio="none">
+      <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function ReturnChip({ label, value }) {
+  const color = value == null ? C.textMuted : value >= 0 ? C.bull : C.bear;
+  return (
+    <div style={{ background: C.panelAlt, border: `1px solid ${C.border}`, borderRadius: 6, padding: "5px 8px", textAlign: "center" }}>
+      <div style={{ ...sans, color: C.textMuted, fontSize: 10 }}>{label}</div>
+      <div style={{ ...mono, color, fontSize: 13, fontWeight: 700 }}>
+        {value == null ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`}
+      </div>
+    </div>
+  );
+}
+
+function SeekingAlphaCard({ pick, state, onRefresh }) {
+  const { bars, loading, error, price, priceAsOf } = state;
+  // Falls back to the 1y series' last close if the lightweight price lookup
+  // itself failed/hasn't loaded yet, so one flaky extra request doesn't blank
+  // out a card that otherwise loaded fine.
+  const currentPrice = price ?? (bars ? bars[bars.length - 1].close : null);
+  const trendColor = bars && bars.length >= 2 ? (currentPrice >= bars[0].close ? C.bull : C.bear) : C.textMuted;
+
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
+      <div className="flex items-start justify-between mb-1">
+        <div className="flex items-baseline gap-2">
+          <span style={{ ...mono, color: C.text, fontSize: 18, fontWeight: 700 }}>{pick.ticker}</span>
+          <span style={{ ...sans, color: C.textMuted, fontSize: 12 }}>{pick.name}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {currentPrice != null && (
+            <span style={{ ...mono, color: C.text, fontSize: 16, fontWeight: 700 }}>${currentPrice.toFixed(2)}</span>
+          )}
+          <button
+            onClick={onRefresh}
+            disabled={loading}
+            style={{ background: "transparent", border: "none", color: C.textMuted, cursor: loading ? "default" : "pointer", padding: 4, display: "flex" }}
+            title="刷新"
+          >
+            {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+          </button>
+        </div>
+      </div>
+      {priceAsOf && (
+        <div style={{ ...mono, color: C.textMuted, fontSize: 10, textAlign: "right", marginBottom: 8 }}>
+          价格更新于 {new Date(priceAsOf).toLocaleTimeString("zh-CN")}
+        </div>
+      )}
+
+      <div style={{ ...sans, color: C.gold, fontSize: 12, fontWeight: 600, marginBottom: 4 }}>{pick.thesis}</div>
+      <div style={{ ...sans, color: C.textMuted, fontSize: 11, marginBottom: 3 }}>{pick.sector}</div>
+      <div style={{ ...sans, color: C.textMuted, fontSize: 12, lineHeight: 1.6, marginBottom: 14 }}>{pick.detail}</div>
+
+      {error && !bars && (
+        <div className="flex items-start gap-1" style={{ color: C.bear, fontSize: 12, marginBottom: 10 }}>
+          <AlertTriangle size={14} style={{ marginTop: 1 }} /> {error}
+        </div>
+      )}
+
+      {bars ? (
+        <>
+          <div style={{ marginBottom: 10 }}>
+            <Sparkline bars={bars} color={trendColor} />
+          </div>
+          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(5, 1fr)" }}>
+            {RETURN_PERIODS.map(({ key, label, days }) => (
+              <ReturnChip key={key} label={label} value={pctChangeOverDays(bars, days)} />
+            ))}
+          </div>
+        </>
+      ) : (
+        !error && (
+          <div className="flex items-center gap-1" style={{ color: C.textMuted, fontSize: 12 }}>
+            {loading && <Loader2 size={12} className="animate-spin" />}
+            <span>{loading ? "获取股价数据中…" : "等待加载"}</span>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+function SeekingAlphaTab() {
+  const [tickerStates, setTickerStates] = useState({});
+  const autoLoadedRef = useRef(new Set());
+
+  const updateState = (ticker, patch) => {
+    setTickerStates((prev) => ({ ...prev, [ticker]: { ...(prev[ticker] || {}), ...patch } }));
+  };
+
+  const load = async (ticker, { force = false } = {}) => {
+    updateState(ticker, { loading: true, error: "" });
+    try {
+      // Fetched concurrently - the lightweight price lookup is a separate,
+      // more-often-stale-marked request (see PRICE_TTL_MS) whose failure
+      // shouldn't blank out a card whose 1-year chart data loaded fine, so
+      // it's caught on its own instead of failing the whole load.
+      const [barsResult, priceResult] = await Promise.all([
+        load1yTickerData(ticker, { force }),
+        loadCurrentPrice(ticker, { force }).catch(() => ({ price: null, asOf: null })),
+      ]);
+      updateState(ticker, {
+        ...barsResult, price: priceResult.price, priceAsOf: priceResult.asOf, error: "", loading: false,
+      });
+    } catch (e) {
+      updateState(ticker, { error: e.message, loading: false });
+    }
+  };
+
+  // Background-load all 10 picks on mount, staggered to avoid bursting
+  // Yahoo's unofficial endpoint - same pattern as the watchlist tab's loader.
+  useEffect(() => {
+    let pending = 0;
+    SEEKING_ALPHA_2026H2.forEach(({ ticker }) => {
+      if (autoLoadedRef.current.has(ticker)) return;
+      autoLoadedRef.current.add(ticker);
+      const delay = pending * 150;
+      pending += 1;
+      setTimeout(() => load(ticker), delay);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div style={{ ...sans, padding: 24, maxWidth: 900, margin: "0 auto" }}>
+      <div className="flex items-center gap-2 mb-1">
+        <TrendingUp size={22} color={C.gold} />
+        <h1 style={{ color: C.text, fontSize: 22, fontWeight: 700, letterSpacing: 0.3 }}>Seeking Alpha · 2026 下半年选股</h1>
+      </div>
+      <p style={{ color: C.textMuted, fontSize: 12, marginBottom: 20, lineHeight: 1.6 }}>
+        Seeking Alpha 给出的 2026 下半年 10 只精选个股，附当前股价、过去1年走势图，以及1周/1月/3月/6月/1年涨跌幅——数据来自 Yahoo Finance，仅作研究参考，不构成投资建议。
+      </p>
+      <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(380px, 1fr))" }}>
+        {SEEKING_ALPHA_2026H2.map((pick) => (
+          <SeekingAlphaCard
+            key={pick.ticker}
+            pick={pick}
+            state={tickerStates[pick.ticker] || {}}
+            onRefresh={() => load(pick.ticker, { force: true })}
+          />
+        ))}
       </div>
     </div>
   );

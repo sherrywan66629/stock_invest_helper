@@ -40,12 +40,18 @@ function saveStore(store) {
   }
 }
 
-export function getCachedBars(ticker) {
+// ttlMs/slide let callers use a different freshness policy under the same
+// store - e.g. the Seeking Alpha tab's current-price cache uses a much
+// shorter, non-sliding TTL (see App.jsx) instead of the default 6h/sliding
+// policy the daily-bar caches (both the 6mo and @1y ones) rely on.
+export function getCachedBars(ticker, { ttlMs = TTL_MS, slide = true } = {}) {
   const store = loadStore();
   const entry = store.entries[ticker];
-  if (!entry || Date.now() - entry.fetchedAt > TTL_MS) return null;
-  entry.fetchedAt = Date.now();
-  saveStore(store);
+  if (!entry || Date.now() - entry.fetchedAt > ttlMs) return null;
+  if (slide) {
+    entry.fetchedAt = Date.now();
+    saveStore(store);
+  }
   return entry.bars;
 }
 
