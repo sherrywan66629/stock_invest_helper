@@ -1283,13 +1283,31 @@ function Sidebar({ activeTab, onSelect }) {
 // ---------- App shell: sidebar + active tab's content ----------
 export default function App() {
   const [activeTab, setActiveTab] = useState(TABS[0].key);
-  const ActiveComponent = TABS.find((t) => t.key === activeTab).Component;
+  // Tabs are mounted once, the first time they're visited, and then kept
+  // mounted (just hidden via CSS) for the rest of the session instead of
+  // being unmounted when you switch away. Switching tabs used to fully
+  // destroy the previous tab's component tree, which reset all of its local
+  // state (loaded bars, prices, etc.) back to empty - so every time you came
+  // back, cards briefly went blank and re-populated even though the
+  // underlying data was still sitting in the localStorage cache untouched.
+  // Keeping the component alive means that flash is gone, and a tab you
+  // never open never fetches anything in the first place.
+  const [visitedTabs, setVisitedTabs] = useState(() => new Set([TABS[0].key]));
+
+  const selectTab = (key) => {
+    setActiveTab(key);
+    setVisitedTabs((prev) => (prev.has(key) ? prev : new Set(prev).add(key)));
+  };
 
   return (
     <div style={{ background: C.bg, minHeight: "100vh", display: "flex" }}>
-      <Sidebar activeTab={activeTab} onSelect={setActiveTab} />
+      <Sidebar activeTab={activeTab} onSelect={selectTab} />
       <div style={{ flex: 1, height: "100vh", overflowY: "auto", position: "relative" }}>
-        <ActiveComponent />
+        {TABS.filter((t) => visitedTabs.has(t.key)).map(({ key, Component }) => (
+          <div key={key} style={{ display: key === activeTab ? "block" : "none", height: "100%" }}>
+            <Component />
+          </div>
+        ))}
       </div>
     </div>
   );
